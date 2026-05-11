@@ -369,9 +369,9 @@ def query_arcgis_features(
         "returnGeometry": "false",
         "resultRecordCount": record_count,
     }
-    data = http_json(f"{layer_url}/query", params, timeout=90, method="POST")
+    data = http_json(f"{layer_url}/query", params, timeout=90, method="GET")
     if "error" in data and data["error"].get("message") == "Error performing query operation":
-        data = http_json(f"{layer_url}/query", params, timeout=90, method="GET")
+        data = http_json(f"{layer_url}/query", params, timeout=90, method="POST")
     if "error" in data:
         message = data["error"].get("message", "ArcGIS query error")
         raise ZoneCheckError(message)
