@@ -729,7 +729,140 @@ def result_summary_for_map(results: list[ZoneResult]) -> list[dict[str, Any]]:
     ]
 
 
-def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 13) -> str:
+def query_arcgis_geojson(
+    layer_url: str,
+    location: Location,
+    out_fields: str,
+    record_count: int = 50,
+) -> dict[str, Any]:
+    """Return overlapping ArcGIS features as GeoJSON for map display."""
+
+    geometry, geometry_type = arcgis_geometry(location)
+    params = {
+        "f": "geojson",
+        "where": "1=1",
+        "geometry": geometry,
+        "geometryType": geometry_type,
+        "inSR": 4326,
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": out_fields,
+        "returnGeometry": "true",
+        "outSR": 4326,
+        "geometryPrecision": 6,
+        "resultRecordCount": record_count,
+    }
+    data = http_json(f"{layer_url}/query", params, timeout=90, method="GET")
+    if "error" in data and data["error"].get("message") == "Error performing query operation":
+        data = http_json(f"{layer_url}/query", params, timeout=90, method="POST")
+    if "error" in data:
+        message = data["error"].get("message", "ArcGIS GeoJSON query error")
+        raise ZoneCheckError(message)
+    if data.get("type") != "FeatureCollection":
+        raise ZoneCheckError(f"Unexpected GeoJSON response from {layer_url}")
+    return data
+
+
+def build_map_feature_overlays(location: Location) -> list[dict[str, Any]]:
+    """Fetch overlapping Ontario GeoHub/LIO features for aligned vector map layers."""
+
+    specs = [
+        {
+            "key": "wetlands",
+            "label": "Wetland overlaps",
+            "source": "Ontario Wetland With Significance",
+            "layer_url": ONTARIO_WETLAND_LAYER,
+            "fields": (
+                "WETLAND_TYPE,EVALUATED_WETLAND_NAME,WETLAND_SIGNIFICANCE,"
+                "EVALUATED_WETLAND_IND,SYSTEM_CALCULATED_AREA"
+            ),
+            "color": "#0284c7",
+            "fillColor": "#38bdf8",
+        },
+        {
+            "key": "wooded",
+            "label": "Wooded area overlaps",
+            "source": "Ontario Wooded Area",
+            "layer_url": ONTARIO_WOODED_AREA_LAYER,
+            "fields": "WOODED_AREA_TYPE,CLASS_SUBTYPE,SYSTEM_CALCULATED_AREA",
+            "color": "#15803d",
+            "fillColor": "#22c55e",
+        },
+        {
+            "key": "parks_reserves",
+            "label": "Parks and conservation reserve overlaps",
+            "source": "Provincial Park Regulated / Conservation Reserve Regulated",
+            "layer_url": LIO_OPEN03_MAPSERVER,
+            "layers": [
+                (
+                    ONTARIO_PROVINCIAL_PARK_LAYER,
+                    "PROTECTED_AREA_NAME_ENG,TYPE_ENG,STATUS_ENG,SYSTEM_CALCULATED_AREA",
+                ),
+                (
+                    ONTARIO_CONSERVATION_RESERVE_LAYER,
+                    "PROTECTED_AREA_NAME_ENG,TYPE_ENG,STATUS_ENG,SYSTEM_CALCULATED_AREA",
+                ),
+            ],
+            "color": "#dc2626",
+            "fillColor": "#f87171",
+        },
+        {
+            "key": "natural_heritage",
+            "label": "ANSI and Crown Game Preserve overlaps",
+            "source": "ANSI / Crown Game Preserve",
+            "layer_url": LIO_OPEN05_MAPSERVER,
+            "layers": [
+                (
+                    ONTARIO_ANSI_LAYER,
+                    "ANSI_NAME,CLASS_SUBTYPE,ANSI_SIGNIFICANCE,SYSTEM_CALCULATED_AREA",
+                ),
+                (
+                    ONTARIO_CROWN_GAME_PRESERVE_LAYER,
+                    "OFFICIAL_NAME,REGULATED_IND,SYSTEM_CALCULATED_AREA",
+                ),
+            ],
+            "color": "#ca8a04",
+            "fillColor": "#facc15",
+        },
+    ]
+
+    overlays: list[dict[str, Any]] = []
+    for spec in specs:
+        feature_collection = {"type": "FeatureCollection", "features": []}
+        error = None
+        try:
+            if "layers" in spec:
+                for layer_url, fields in spec["layers"]:
+                    layer_features = query_arcgis_geojson(layer_url, location, fields)
+                    feature_collection["features"].extend(layer_features.get("features", []))
+            else:
+                feature_collection = query_arcgis_geojson(
+                    spec["layer_url"],
+                    location,
+                    spec["fields"],
+                )
+        except ZoneCheckError as exc:
+            error = str(exc)
+
+        overlays.append(
+            {
+                "key": spec["key"],
+                "label": spec["label"],
+                "source": spec["source"],
+                "color": spec["color"],
+                "fillColor": spec["fillColor"],
+                "featureCollection": feature_collection,
+                "error": error,
+            }
+        )
+    return overlays
+
+
+def render_map_html(
+    location: Location,
+    results: list[ZoneResult],
+    feature_overlays: list[dict[str, Any]] | None = None,
+    zoom: int = 13,
+) -> str:
     """Render a standalone interactive HTML map for the checked location."""
 
     location_data = {
@@ -749,10 +882,13 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
         polygon_data = [
             [latitude, longitude] for latitude, longitude in location.polygon_vertices
         ]
+    if feature_overlays is None:
+        feature_overlays = []
     location_json = json.dumps(location_data, ensure_ascii=True)
     polygon_json = json.dumps(polygon_data, ensure_ascii=True)
     results_json = json.dumps(result_summary_for_map(results), ensure_ascii=True)
     services_json = json.dumps(service_data, ensure_ascii=True)
+    overlays_json = json.dumps(feature_overlays, ensure_ascii=True)
     title = html.escape(f"Zone map for {location.label}")
 
     return f"""<!doctype html>
@@ -768,51 +904,69 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
     crossorigin=""
   >
   <style>
+    :root {{
+      --panel-bg: rgba(255, 255, 255, 0.96);
+      --border: #d9e2ec;
+      --text: #1f2933;
+      --muted: #52606d;
+      --shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+    }}
     body {{
       font-family: Arial, Helvetica, sans-serif;
       margin: 0;
-      color: #1f2933;
-      background: #f5f7fa;
+      color: var(--text);
+      background: #eef2f7;
     }}
     header {{
-      padding: 16px 20px;
-      background: #12355b;
+      padding: 14px 20px;
+      background: linear-gradient(135deg, #12355b, #0f766e);
       color: white;
     }}
     header h1 {{
       margin: 0 0 6px;
-      font-size: 1.35rem;
+      font-size: 1.25rem;
     }}
     header p {{
       margin: 0;
-      font-size: 0.95rem;
+      font-size: 0.9rem;
+      opacity: 0.92;
     }}
     main {{
-      display: grid;
-      grid-template-columns: minmax(320px, 420px) 1fr;
-      min-height: calc(100vh - 76px);
-    }}
-    aside {{
-      padding: 16px;
-      overflow: auto;
-      border-right: 1px solid #d9e2ec;
-      background: white;
+      position: relative;
+      height: calc(100vh - 74px);
     }}
     #map {{
-      min-height: 620px;
-      height: calc(100vh - 76px);
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+    }}
+    #panel {{
+      position: absolute;
+      z-index: 500;
+      top: 16px;
+      left: 16px;
+      width: min(410px, calc(100vw - 32px));
+      max-height: calc(100vh - 116px);
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--panel-bg);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(8px);
+    }}
+    #panel-content {{
+      padding: 14px;
     }}
     .card {{
-      border: 1px solid #d9e2ec;
-      border-radius: 10px;
-      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 11px 12px;
       margin-bottom: 12px;
       background: #ffffff;
-      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
     }}
     .card h2 {{
       margin: 0 0 8px;
-      font-size: 1rem;
+      font-size: 0.98rem;
     }}
     .status {{
       display: inline-block;
@@ -825,12 +979,22 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
     .YES {{ background: #d3f9d8; color: #1b5e20; }}
     .NO {{ background: #ffe3e3; color: #9b1c1c; }}
     .UNKNOWN {{ background: #fff3bf; color: #7c5c00; }}
+    .pill {{
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 3px 8px;
+      margin: 2px 4px 2px 0;
+      background: #f8fafc;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }}
     .detail {{
       margin: 6px 0;
       line-height: 1.35;
     }}
     .small {{
-      color: #52606d;
+      color: var(--muted);
       font-size: 0.85rem;
     }}
     .legend-item {{
@@ -842,20 +1006,28 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
     .swatch {{
       width: 18px;
       height: 12px;
-      border: 1px solid #52606d;
+      border: 1px solid var(--muted);
       opacity: 0.8;
+      border-radius: 3px;
     }}
-    @media (max-width: 850px) {{
+    .leaflet-control-layers {{
+      border: 0 !important;
+      border-radius: 12px !important;
+      box-shadow: var(--shadow) !important;
+      font-size: 0.9rem;
+    }}
+    @media (max-width: 760px) {{
+      header {{
+        padding: 11px 14px;
+      }}
       main {{
-        grid-template-columns: 1fr;
+        height: calc(100vh - 92px);
       }}
-      aside {{
-        border-right: 0;
-        border-bottom: 1px solid #d9e2ec;
-      }}
-      #map {{
-        height: 70vh;
-        min-height: 440px;
+      #panel {{
+        left: 10px;
+        top: 10px;
+        width: calc(100vw - 20px);
+        max-height: 42vh;
       }}
     }}
   </style>
@@ -863,38 +1035,34 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
 <body>
   <header>
     <h1>{title}</h1>
-    <p>Interactive feasibility map with Ontario GeoHub/LIO wetland, wooded, and regulated/natural-heritage layers.</p>
+    <p>Clean vector map of the checked geometry and Ontario GeoHub/LIO overlap results.</p>
   </header>
   <main>
-    <aside>
-      <section class="card" id="location-card"></section>
-      <section id="results"></section>
-      <section class="card">
-        <h2>Layer guide</h2>
-        <div class="legend-item"><span class="swatch" style="background:#4dabf7"></span>Ontario wetlands</div>
-        <div class="legend-item"><span class="swatch" style="background:#51cf66"></span>Ontario wooded areas</div>
-        <div class="legend-item"><span class="swatch" style="background:#ff6b6b"></span>Provincial parks and conservation reserves</div>
-        <div class="legend-item"><span class="swatch" style="background:#ffd43b"></span>ANSIs and Crown Game Preserves</div>
-        <p class="small">Use the layer control on the map to turn layers on or off. Some services only draw at certain zoom levels.</p>
-      </section>
-      <section class="card">
-        <h2>Important note</h2>
-        <p class="small">Ontario regulated and natural-heritage layers are shown as practical indicators for constraints. Always confirm legal restrictions with the responsible authority.</p>
-      </section>
-    </aside>
     <div id="map"></div>
+    <aside id="panel">
+      <div id="panel-content">
+        <section class="card" id="location-card"></section>
+        <section class="card" id="layer-summary"></section>
+        <section id="results"></section>
+        <section class="card">
+          <h2>Notes</h2>
+          <p class="small">The colored overlays are GeoJSON features returned by the Ontario GeoHub/LIO overlap queries, so they align directly with the basemap.</p>
+          <p class="small">For polygon checks, the submitted polygon is shown exactly. The API overlap screening uses its bounding box for reliability with LIO services.</p>
+        </section>
+      </div>
+    </aside>
   </main>
   <script
     src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
     crossorigin="">
   </script>
-  <script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
   <script>
     const locationData = {location_json};
     const polygonCoordinates = {polygon_json};
     const zoneResults = {results_json};
-    const services = {services_json};
+    const dataSources = {services_json};
+    const featureOverlays = {overlays_json};
 
     function escapeHtml(value) {{
       const replacements = {{
@@ -907,6 +1075,18 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
       return String(value).replace(/[&<>"']/g, (character) => replacements[character]);
     }}
 
+    function propertiesHtml(properties) {{
+      const entries = Object.entries(properties || {{}})
+        .filter(([, value]) => value !== null && value !== undefined && value !== "")
+        .slice(0, 8);
+      if (!entries.length) {{
+        return "<em>No attributes returned</em>";
+      }}
+      return entries
+        .map(([key, value]) => `<strong>${{escapeHtml(key)}}:</strong> ${{escapeHtml(value)}}`)
+        .join("<br>");
+    }}
+
     document.getElementById("location-card").innerHTML = `
       <h2>Checked location</h2>
       <p class="detail"><strong>${{escapeHtml(locationData.label)}}</strong></p>
@@ -915,6 +1095,23 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
         ${{polygonCoordinates ? "Center longitude: " : "Longitude: "}}${{locationData.longitude.toFixed(6)}}
       </p>
       <p class="small">Resolved by: ${{escapeHtml(locationData.source)}}</p>
+    `;
+
+    const overlaySummary = featureOverlays.map((overlay) => {{
+      const count = overlay.featureCollection?.features?.length || 0;
+      const error = overlay.error ? ` <span class="UNKNOWN status">error</span>` : "";
+      return `
+        <div class="legend-item">
+          <span class="swatch" style="background:${{overlay.fillColor}}; border-color:${{overlay.color}}"></span>
+          <span>${{escapeHtml(overlay.label)}} <span class="pill">${{count}} feature${{count === 1 ? "" : "s"}}</span>${{error}}</span>
+        </div>
+      `;
+    }}).join("");
+
+    document.getElementById("layer-summary").innerHTML = `
+      <h2>Map layers</h2>
+      ${{overlaySummary || '<p class="small">No feature overlays were requested.</p>'}}
+      <p class="small">Layer controls are in the top-right corner of the map.</p>
     `;
 
     document.getElementById("results").innerHTML = zoneResults.map((result) => `
@@ -932,53 +1129,24 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
       attribution: "&copy; OpenStreetMap contributors"
     }}).addTo(map);
 
-    const imagery = L.tileLayer(
-      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}",
-      {{
-        maxZoom: 19,
-        attribution: "Tiles &copy; Esri"
-      }}
-    );
-
-    const wetlands = L.esri.dynamicMapLayer({{
-      url: services.wetland,
-      layers: [15],
-      opacity: 0.58,
-      attribution: "Ontario GeoHub / LIO Wetlands"
-    }});
-
-    const woodedAreas = L.esri.dynamicMapLayer({{
-      url: services.wooded,
-      layers: [29],
-      opacity: 0.42,
-      attribution: "Ontario GeoHub / LIO Wooded Area"
-    }}).addTo(map);
-
-    const parksAndReserves = L.esri.dynamicMapLayer({{
-      url: services.parksAndReserves,
-      layers: [2, 4],
-      opacity: 0.62,
-      attribution: "Ontario GeoHub / LIO Parks and Conservation Reserves"
-    }}).addTo(map);
-
-    const naturalHeritage = L.esri.dynamicMapLayer({{
-      url: services.naturalHeritage,
-      layers: [3, 7],
-      opacity: 0.52,
-      attribution: "Ontario GeoHub / LIO ANSI and Crown Game Preserve"
+    const topo = L.tileLayer("https://{{s}}.tile.opentopomap.org/{{z}}/{{x}}/{{y}}.png", {{
+      maxZoom: 17,
+      attribution: "Map data &copy; OpenStreetMap contributors, SRTM | OpenTopoMap"
     }});
 
     const submittedOverlays = {{}};
+    const fitGroup = L.featureGroup().addTo(map);
     if (polygonCoordinates) {{
       const submittedPolygon = L.polygon(polygonCoordinates, {{
-        color: "#1c7ed6",
+        color: "#0f172a",
         weight: 3,
-        fillColor: "#74c0fc",
-        fillOpacity: 0.12
+        dashArray: "7 5",
+        fillColor: "#ffffff",
+        fillOpacity: 0.08
       }})
         .addTo(map)
         .bindPopup(`<strong>${{escapeHtml(locationData.label)}}</strong><br>${{polygonCoordinates.length}} vertices`);
-      map.fitBounds(submittedPolygon.getBounds().pad(0.25));
+      fitGroup.addLayer(submittedPolygon);
       submittedOverlays["Submitted polygon"] = submittedPolygon;
     }} else {{
       const marker = L.marker([locationData.latitude, locationData.longitude])
@@ -988,26 +1156,56 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
 
       const oneKmRadius = L.circle([locationData.latitude, locationData.longitude], {{
         radius: 1000,
-        color: "#1c7ed6",
+        color: "#0f172a",
         weight: 2,
         fillColor: "#74c0fc",
         fillOpacity: 0.08
       }}).addTo(map);
+      fitGroup.addLayer(marker);
+      fitGroup.addLayer(oneKmRadius);
       submittedOverlays["1 km context radius"] = oneKmRadius;
       submittedOverlays["Checked location marker"] = marker;
+    }}
+
+    const overlapLayers = {{}};
+    featureOverlays.forEach((overlay) => {{
+      const features = overlay.featureCollection?.features || [];
+      if (!features.length) {{
+        return;
+      }}
+      const layer = L.geoJSON(overlay.featureCollection, {{
+        style: {{
+          color: overlay.color,
+          weight: 2,
+          opacity: 0.95,
+          fillColor: overlay.fillColor,
+          fillOpacity: 0.28
+        }},
+        pointToLayer: (feature, latlng) => L.circleMarker(latlng, {{
+          radius: 6,
+          color: overlay.color,
+          weight: 2,
+          fillColor: overlay.fillColor,
+          fillOpacity: 0.85
+        }}),
+        onEachFeature: (feature, layer) => {{
+          layer.bindPopup(`<strong>${{escapeHtml(overlay.label)}}</strong><br>${{propertiesHtml(feature.properties)}}`);
+        }}
+      }}).addTo(map);
+      fitGroup.addLayer(layer);
+      overlapLayers[`${{overlay.label}} (${{features.length}})`] = layer;
+    }});
+
+    if (fitGroup.getLayers().length) {{
+      map.fitBounds(fitGroup.getBounds().pad(0.18));
     }}
 
     L.control.layers(
       {{
         "OpenStreetMap": osm,
-        "Esri World Imagery": imagery
+        "OpenTopoMap": topo
       }},
-      Object.assign({{
-        "Ontario wetlands": wetlands,
-        "Ontario wooded areas": woodedAreas,
-        "Provincial parks and conservation reserves": parksAndReserves,
-        "ANSIs and Crown Game Preserves": naturalHeritage
-      }}, submittedOverlays),
+      Object.assign({{}}, overlapLayers, submittedOverlays),
       {{ collapsed: false }}
     ).addTo(map);
   </script>
@@ -1020,13 +1218,17 @@ def write_map_html(
     location: Location,
     results: list[ZoneResult],
     output_path: Path | str | None = None,
+    feature_overlays: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Write an interactive map HTML file and return its absolute path."""
 
     path = Path(output_path).expanduser() if output_path else default_map_path(location)
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_map_html(location, results), encoding="utf-8")
+    path.write_text(
+        render_map_html(location, results, feature_overlays=feature_overlays),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -1094,7 +1296,13 @@ def main(argv: list[str] | None = None) -> int:
 
     print_report(location, results)
     if not args.no_map:
-        map_path = write_map_html(location, results, args.map_output)
+        feature_overlays = build_map_feature_overlays(location)
+        map_path = write_map_html(
+            location,
+            results,
+            args.map_output,
+            feature_overlays=feature_overlays,
+        )
         print(f"\nInteractive map saved to: {map_path}")
         if args.open_map:
             webbrowser.open(map_path.as_uri())
