@@ -10,11 +10,14 @@ from canada_zone_checker import (
     ONTARIO_BOUNDS,
     ZoneCheckError,
     ZoneResult,
+    arcgis_geometry,
     default_map_path,
     format_area_hectares,
     is_inside_ontario_bounds,
     parse_coordinate_pair,
+    parse_polygon_coordinates,
     render_map_html,
+    resolve_polygon,
     safe_map_filename,
     status_word,
     Location,
@@ -33,6 +36,29 @@ class OntarioZoneCheckerTests(unittest.TestCase):
 
     def test_parse_coordinate_pair_returns_none_for_address(self):
         self.assertIsNone(parse_coordinate_pair("Ottawa, ON"))
+
+    def test_parse_polygon_coordinates_accepts_semicolon_vertices(self):
+        vertices = parse_polygon_coordinates(
+            "43.273, -79.923; 43.273, -79.921; 43.275, -79.921; 43.275, -79.923"
+        )
+
+        self.assertEqual(len(vertices), 4)
+        self.assertEqual(vertices[0], (43.273, -79.923))
+
+    def test_parse_polygon_coordinates_rejects_too_few_vertices(self):
+        with self.assertRaises(ZoneCheckError):
+            parse_polygon_coordinates("43.273, -79.923; 43.275, -79.921")
+
+    def test_resolve_polygon_sets_center_and_geometry(self):
+        location = resolve_polygon(
+            "43.273, -79.923; 43.273, -79.921; 43.275, -79.921; 43.275, -79.923"
+        )
+        geometry, geometry_type = arcgis_geometry(location)
+
+        self.assertTrue(location.is_polygon)
+        self.assertAlmostEqual(location.latitude, 43.274)
+        self.assertEqual(geometry_type, "esriGeometryPolygon")
+        self.assertIn('"rings"', geometry)
 
     def test_format_area_hectares(self):
         self.assertEqual(format_area_hectares(12345), "1.23 ha")
@@ -54,6 +80,21 @@ class OntarioZoneCheckerTests(unittest.TestCase):
         self.assertTrue(is_inside_ontario_bounds(ottawa))
         self.assertFalse(is_inside_ontario_bounds(paris))
         self.assertLess(ONTARIO_BOUNDS["min_lon"], ottawa.longitude)
+
+    def test_inside_ontario_bounds_checks_polygon_vertices(self):
+        ontario_polygon = resolve_polygon(
+            "43.273, -79.923; 43.273, -79.921; 43.275, -79.921; 43.275, -79.923"
+        )
+        outside_polygon = Location(
+            "Outside",
+            48.0,
+            2.0,
+            "test",
+            ((48.0, 2.0), (48.0, 2.1), (48.1, 2.1)),
+        )
+
+        self.assertTrue(is_inside_ontario_bounds(ontario_polygon))
+        self.assertFalse(is_inside_ontario_bounds(outside_polygon))
 
     def test_status_word(self):
         self.assertEqual(status_word(True), "YES")
@@ -94,6 +135,17 @@ class OntarioZoneCheckerTests(unittest.TestCase):
         self.assertIn(LIO_OPEN07_MAPSERVER, rendered)
         self.assertIn('"status": "YES"', rendered)
         self.assertIn("Example &lt;Place&gt;", rendered)
+
+    def test_render_map_html_includes_submitted_polygon(self):
+        location = resolve_polygon(
+            "43.273, -79.923; 43.273, -79.921; 43.275, -79.921; 43.275, -79.923"
+        )
+
+        rendered = render_map_html(location, [ZoneResult("Wetland", True, "source", [])])
+
+        self.assertIn("Submitted polygon", rendered)
+        self.assertIn("polygonCoordinates", rendered)
+        self.assertIn("-79.923", rendered)
 
     def test_write_map_html_writes_requested_path(self):
         location = Location("Example", 45.0, -75.0, "test")

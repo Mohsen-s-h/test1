@@ -25,11 +25,18 @@ Or run with an Ontario place/address:
 python3 canada_zone_checker.py "Cootes Paradise, Hamilton, Ontario"
 ```
 
+Or assess a polygon by passing vertices in `latitude, longitude` order. Separate
+vertices with semicolons; the script closes the polygon automatically:
+
+```bash
+python3 canada_zone_checker.py --polygon "43.2735, -79.9230; 43.2735, -79.9200; 43.2760, -79.9200; 43.2760, -79.9230"
+```
+
 If no argument is supplied, the script prompts for a location interactively.
 
 After the text report, the script also saves an interactive HTML map in the
-current directory. The map is centered on the checked point and includes
-toggleable layers for:
+current directory. The map is centered on the checked point or submitted polygon
+and includes toggleable layers for:
 
 - Ontario wetlands
 - Ontario wooded areas

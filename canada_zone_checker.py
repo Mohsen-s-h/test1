@@ -59,12 +59,19 @@ ONTARIO_BOUNDS = {
 
 @dataclass(frozen=True)
 class Location:
-    """Resolved user location."""
+    """Resolved user location or user-provided polygon."""
 
     label: str
     latitude: float
     longitude: float
     source: str
+    polygon_vertices: tuple[tuple[float, float], ...] | None = None
+
+    @property
+    def is_polygon(self) -> bool:
+        """Return whether this input represents an area instead of a point."""
+
+        return self.polygon_vertices is not None
 
 
 @dataclass(frozen=True)
@@ -123,6 +130,66 @@ def parse_coordinate_pair(text: str) -> tuple[float, float] | None:
     return latitude, longitude
 
 
+def parse_polygon_coordinates(text: str) -> tuple[tuple[float, float], ...]:
+    """Parse semicolon- or newline-separated 'lat, lon' polygon vertices."""
+
+    parts = [part.strip() for part in re.split(r"[;\n|]+", text) if part.strip()]
+    if len(parts) < 3:
+        raise ZoneCheckError("A polygon needs at least three coordinate pairs.")
+
+    vertices: list[tuple[float, float]] = []
+    for part in parts:
+        coordinate_pair = parse_coordinate_pair(part)
+        if coordinate_pair is None:
+            raise ZoneCheckError(
+                "Polygon coordinates must use 'lat, lon' pairs separated by semicolons."
+            )
+        vertices.append(coordinate_pair)
+
+    unique_vertices = set(vertices)
+    if len(unique_vertices) < 3:
+        raise ZoneCheckError("A polygon needs at least three unique vertices.")
+
+    if vertices[0] == vertices[-1]:
+        vertices.pop()
+    return tuple(vertices)
+
+
+def polygon_center(vertices: tuple[tuple[float, float], ...]) -> tuple[float, float]:
+    """Return a simple centroid suitable for map centering and reporting."""
+
+    latitude = sum(vertex[0] for vertex in vertices) / len(vertices)
+    longitude = sum(vertex[1] for vertex in vertices) / len(vertices)
+    return latitude, longitude
+
+
+def polygon_bounds(vertices: tuple[tuple[float, float], ...]) -> dict[str, float]:
+    """Return min/max bounds for polygon vertices."""
+
+    latitudes = [vertex[0] for vertex in vertices]
+    longitudes = [vertex[1] for vertex in vertices]
+    return {
+        "min_lat": min(latitudes),
+        "max_lat": max(latitudes),
+        "min_lon": min(longitudes),
+        "max_lon": max(longitudes),
+    }
+
+
+def resolve_polygon(user_input: str) -> Location:
+    """Resolve user-provided polygon coordinates."""
+
+    vertices = parse_polygon_coordinates(user_input)
+    latitude, longitude = polygon_center(vertices)
+    return Location(
+        label=f"Polygon with {len(vertices)} vertices",
+        latitude=latitude,
+        longitude=longitude,
+        source="user-provided polygon coordinates",
+        polygon_vertices=vertices,
+    )
+
+
 def resolve_location(user_input: str) -> Location:
     """Resolve coordinates directly or geocode an Ontario place/address string."""
 
@@ -167,6 +234,14 @@ def resolve_location(user_input: str) -> Location:
 def is_inside_ontario_bounds(location: Location) -> bool:
     """Return whether coordinates are within a broad Ontario bounding box."""
 
+    if location.polygon_vertices:
+        bounds = polygon_bounds(location.polygon_vertices)
+        return (
+            ONTARIO_BOUNDS["min_lat"] <= bounds["min_lat"]
+            and bounds["max_lat"] <= ONTARIO_BOUNDS["max_lat"]
+            and ONTARIO_BOUNDS["min_lon"] <= bounds["min_lon"]
+            and bounds["max_lon"] <= ONTARIO_BOUNDS["max_lon"]
+        )
     return (
         ONTARIO_BOUNDS["min_lat"] <= location.latitude <= ONTARIO_BOUNDS["max_lat"]
         and ONTARIO_BOUNDS["min_lon"] <= location.longitude <= ONTARIO_BOUNDS["max_lon"]
@@ -185,6 +260,28 @@ def arcgis_point(longitude: float, latitude: float) -> str:
     )
 
 
+def arcgis_polygon(vertices: tuple[tuple[float, float], ...]) -> str:
+    """Build an ArcGIS REST polygon geometry in WGS84."""
+
+    ring = [[longitude, latitude] for latitude, longitude in vertices]
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+    return json.dumps(
+        {
+            "rings": [ring],
+            "spatialReference": {"wkid": 4326},
+        }
+    )
+
+
+def arcgis_geometry(location: Location) -> tuple[str, str]:
+    """Return ArcGIS geometry JSON and geometry type for a point or polygon."""
+
+    if location.polygon_vertices:
+        return arcgis_polygon(location.polygon_vertices), "esriGeometryPolygon"
+    return arcgis_point(location.longitude, location.latitude), "esriGeometryPoint"
+
+
 def arcgis_extent(longitude: float, latitude: float, delta: float = 0.001) -> str:
     """Build a tiny WGS84 map extent around a point for ArcGIS identify calls."""
 
@@ -201,18 +298,19 @@ def arcgis_extent(longitude: float, latitude: float, delta: float = 0.001) -> st
 
 def query_arcgis_features(
     layer_url: str,
-    longitude: float,
-    latitude: float,
+    location: Location,
     out_fields: str,
     record_count: int = 5,
 ) -> list[dict[str, Any]]:
-    """Run a point-in-polygon query against an ArcGIS Feature/MapServer layer."""
+    """Run a spatial-intersection query against an ArcGIS Feature/MapServer layer."""
+
+    geometry, geometry_type = arcgis_geometry(location)
 
     params = {
         "f": "json",
         "where": "1=1",
-        "geometry": arcgis_point(longitude, latitude),
-        "geometryType": "esriGeometryPoint",
+        "geometry": geometry,
+        "geometryType": geometry_type,
         "inSR": 4326,
         "spatialRel": "esriSpatialRelIntersects",
         "outFields": out_fields,
@@ -263,8 +361,15 @@ def format_area_hectares(square_meters: Any) -> str | None:
     return f"{hectares:.2f} ha"
 
 
-def check_wetland(longitude: float, latitude: float) -> ZoneResult:
-    """Check Ontario GeoHub/LIO wetland polygons at a point."""
+def no_overlap_detail(layer_name: str, location: Location) -> str:
+    """Return no-match detail text appropriate for point or polygon checks."""
+
+    verb = "overlapped the polygon" if location.is_polygon else "returned no polygon at the point"
+    return f"{layer_name} {verb}."
+
+
+def check_wetland(location: Location) -> ZoneResult:
+    """Check Ontario GeoHub/LIO wetland polygons against a point or polygon."""
 
     source = "Ontario GeoHub / LIO Wetland With Significance"
     fields = (
@@ -275,8 +380,7 @@ def check_wetland(longitude: float, latitude: float) -> ZoneResult:
     try:
         features = query_arcgis_features(
             ONTARIO_WETLAND_LAYER,
-            longitude,
-            latitude,
+            location,
             fields,
             record_count=5,
         )
@@ -288,7 +392,7 @@ def check_wetland(longitude: float, latitude: float) -> ZoneResult:
             "Wetland",
             False,
             source,
-            ["Ontario Wetland With Significance returned no polygon at the point."],
+            [no_overlap_detail("Ontario Wetland With Significance", location)],
         )
 
     details = []
@@ -312,8 +416,8 @@ def check_wetland(longitude: float, latitude: float) -> ZoneResult:
     return ZoneResult("Wetland", True, source, details)
 
 
-def check_forest(longitude: float, latitude: float) -> ZoneResult:
-    """Check Ontario GeoHub/LIO wooded-area polygons at a point."""
+def check_forest(location: Location) -> ZoneResult:
+    """Check Ontario GeoHub/LIO wooded-area polygons against a point or polygon."""
 
     source = "Ontario GeoHub / LIO Wooded Area"
     fields = (
@@ -323,8 +427,7 @@ def check_forest(longitude: float, latitude: float) -> ZoneResult:
     try:
         features = query_arcgis_features(
             ONTARIO_WOODED_AREA_LAYER,
-            longitude,
-            latitude,
+            location,
             fields,
             record_count=5,
         )
@@ -336,7 +439,7 @@ def check_forest(longitude: float, latitude: float) -> ZoneResult:
             "Wooded/forest area",
             False,
             source,
-            ["Ontario Wooded Area returned no polygon at the point."],
+            [no_overlap_detail("Ontario Wooded Area", location)],
         )
 
     details = []
@@ -357,8 +460,7 @@ def check_forest(longitude: float, latitude: float) -> ZoneResult:
 def query_named_layer(
     layer_url: str,
     layer_name: str,
-    longitude: float,
-    latitude: float,
+    location: Location,
     fields: str,
 ) -> tuple[str, list[dict[str, Any]] | None, str | None]:
     """Query one Ontario GeoHub/LIO named layer."""
@@ -366,8 +468,7 @@ def query_named_layer(
     try:
         features = query_arcgis_features(
             layer_url,
-            longitude,
-            latitude,
+            location,
             fields,
             record_count=5,
         )
@@ -408,8 +509,8 @@ def describe_protected_feature(layer_name: str, attrs: dict[str, Any]) -> str:
     return line
 
 
-def check_restricted_area(longitude: float, latitude: float) -> ZoneResult:
-    """Check Ontario regulated/protected and natural-heritage constraint layers."""
+def check_restricted_area(location: Location) -> ZoneResult:
+    """Check Ontario regulated/protected constraint layers against a geometry."""
 
     source = (
         "Ontario GeoHub / LIO Provincial Park Regulated, Conservation Reserve "
@@ -450,8 +551,7 @@ def check_restricted_area(longitude: float, latitude: float) -> ZoneResult:
         queried_name, features, error = query_named_layer(
             layer_url,
             layer_name,
-            longitude,
-            latitude,
+            location,
             fields,
         )
         if error:
@@ -470,7 +570,11 @@ def check_restricted_area(longitude: float, latitude: float) -> ZoneResult:
             False,
             source,
             [
-                "No Ontario protected/restricted layer matched the point.",
+                (
+                    "No Ontario protected/restricted layer overlapped the polygon."
+                    if location.is_polygon
+                    else "No Ontario protected/restricted layer matched the point."
+                ),
                 "Some layer queries failed: " + "; ".join(errors),
             ],
         )
@@ -478,7 +582,13 @@ def check_restricted_area(longitude: float, latitude: float) -> ZoneResult:
         "Restricted/protected area",
         False,
         source,
-        ["No Ontario protected/restricted layer matched the point."],
+        [
+            (
+                "No Ontario protected/restricted layer overlapped the polygon."
+                if location.is_polygon
+                else "No Ontario protected/restricted layer matched the point."
+            )
+        ],
     )
 
 
@@ -486,9 +596,9 @@ def check_location(location: Location) -> list[ZoneResult]:
     """Run all zone checks for a resolved location."""
 
     return [
-        check_wetland(location.longitude, location.latitude),
-        check_forest(location.longitude, location.latitude),
-        check_restricted_area(location.longitude, location.latitude),
+        check_wetland(location),
+        check_forest(location),
+        check_restricted_area(location),
     ]
 
 
@@ -507,7 +617,11 @@ def print_report(location: Location, results: list[ZoneResult]) -> None:
 
     print("Location")
     print(f"  Label: {location.label}")
-    print(f"  Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
+    if location.polygon_vertices:
+        print(f"  Geometry: polygon ({len(location.polygon_vertices)} vertices)")
+        print(f"  Map center: {location.latitude:.6f}, {location.longitude:.6f}")
+    else:
+        print(f"  Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
     print(f"  Resolved by: {location.source}")
     if not is_inside_ontario_bounds(location):
         print("  Warning: coordinates are outside a broad Ontario bounding box.")
@@ -575,7 +689,13 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
         "naturalHeritage": LIO_OPEN05_MAPSERVER,
         "wooded": LIO_OPEN07_MAPSERVER,
     }
+    polygon_data = None
+    if location.polygon_vertices:
+        polygon_data = [
+            [latitude, longitude] for latitude, longitude in location.polygon_vertices
+        ]
     location_json = json.dumps(location_data, ensure_ascii=True)
+    polygon_json = json.dumps(polygon_data, ensure_ascii=True)
     results_json = json.dumps(result_summary_for_map(results), ensure_ascii=True)
     services_json = json.dumps(service_data, ensure_ascii=True)
     title = html.escape(f"Zone map for {location.label}")
@@ -717,6 +837,7 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
   <script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
   <script>
     const locationData = {location_json};
+    const polygonCoordinates = {polygon_json};
     const zoneResults = {results_json};
     const services = {services_json};
 
@@ -734,7 +855,10 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
     document.getElementById("location-card").innerHTML = `
       <h2>Checked location</h2>
       <p class="detail"><strong>${{escapeHtml(locationData.label)}}</strong></p>
-      <p class="detail">Latitude: ${{locationData.latitude.toFixed(6)}}<br>Longitude: ${{locationData.longitude.toFixed(6)}}</p>
+      <p class="detail">
+        ${{polygonCoordinates ? `Polygon vertices: ${{polygonCoordinates.length}}<br>Map center: ` : "Latitude: "}}${{locationData.latitude.toFixed(6)}}<br>
+        ${{polygonCoordinates ? "Center longitude: " : "Longitude: "}}${{locationData.longitude.toFixed(6)}}
+      </p>
       <p class="small">Resolved by: ${{escapeHtml(locationData.source)}}</p>
     `;
 
@@ -789,32 +913,46 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
       attribution: "Ontario GeoHub / LIO ANSI and Crown Game Preserve"
     }});
 
-    const marker = L.marker([locationData.latitude, locationData.longitude])
-      .addTo(map)
-      .bindPopup(`<strong>${{escapeHtml(locationData.label)}}</strong><br>${{locationData.latitude.toFixed(6)}}, ${{locationData.longitude.toFixed(6)}}`)
-      .openPopup();
+    const submittedOverlays = {{}};
+    if (polygonCoordinates) {{
+      const submittedPolygon = L.polygon(polygonCoordinates, {{
+        color: "#1c7ed6",
+        weight: 3,
+        fillColor: "#74c0fc",
+        fillOpacity: 0.12
+      }})
+        .addTo(map)
+        .bindPopup(`<strong>${{escapeHtml(locationData.label)}}</strong><br>${{polygonCoordinates.length}} vertices`);
+      map.fitBounds(submittedPolygon.getBounds().pad(0.25));
+      submittedOverlays["Submitted polygon"] = submittedPolygon;
+    }} else {{
+      const marker = L.marker([locationData.latitude, locationData.longitude])
+        .addTo(map)
+        .bindPopup(`<strong>${{escapeHtml(locationData.label)}}</strong><br>${{locationData.latitude.toFixed(6)}}, ${{locationData.longitude.toFixed(6)}}`)
+        .openPopup();
 
-    const oneKmRadius = L.circle([locationData.latitude, locationData.longitude], {{
-      radius: 1000,
-      color: "#1c7ed6",
-      weight: 2,
-      fillColor: "#74c0fc",
-      fillOpacity: 0.08
-    }}).addTo(map);
+      const oneKmRadius = L.circle([locationData.latitude, locationData.longitude], {{
+        radius: 1000,
+        color: "#1c7ed6",
+        weight: 2,
+        fillColor: "#74c0fc",
+        fillOpacity: 0.08
+      }}).addTo(map);
+      submittedOverlays["1 km context radius"] = oneKmRadius;
+      submittedOverlays["Checked location marker"] = marker;
+    }}
 
     L.control.layers(
       {{
         "OpenStreetMap": osm,
         "Esri World Imagery": imagery
       }},
-      {{
+      Object.assign({{
         "Ontario wetlands": wetlands,
         "Ontario wooded areas": woodedAreas,
         "Provincial parks and conservation reserves": parksAndReserves,
-        "ANSIs and Crown Game Preserves": naturalHeritage,
-        "1 km context radius": oneKmRadius,
-        "Checked location marker": marker
-      }},
+        "ANSIs and Crown Game Preserves": naturalHeritage
+      }}, submittedOverlays),
       {{ collapsed: false }}
     ).addTo(map);
   </script>
@@ -852,6 +990,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Address/place in Ontario, or coordinates as 'latitude, longitude'.",
     )
     parser.add_argument(
+        "--polygon",
+        help=(
+            "Assess an Ontario polygon instead of a point. Provide vertices as "
+            "'lat, lon; lat, lon; lat, lon'. The polygon is closed automatically."
+        ),
+    )
+    parser.add_argument(
         "--map-output",
         default=None,
         help=(
@@ -876,15 +1021,17 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
 
     args = build_parser().parse_args(argv)
-    user_location = args.location or input(
-        "Enter an Ontario address/place or coordinates as 'latitude, longitude': "
-    ).strip()
-    if not user_location:
-        print("No location provided.", file=sys.stderr)
-        return 2
-
     try:
-        location = resolve_location(user_location)
+        if args.polygon:
+            location = resolve_polygon(args.polygon)
+        else:
+            user_location = args.location or input(
+                "Enter an Ontario address/place or coordinates as 'latitude, longitude': "
+            ).strip()
+            if not user_location:
+                print("No location provided.", file=sys.stderr)
+                return 2
+            location = resolve_location(user_location)
         results = check_location(location)
     except ZoneCheckError as exc:
         print(f"Error: {exc}", file=sys.stderr)
