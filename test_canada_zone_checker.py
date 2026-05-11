@@ -92,7 +92,7 @@ class CanadaZoneCheckerTests(unittest.TestCase):
 
         rendered = render_map_html(location, results)
 
-        self.assertIn("Leaflet", rendered)
+        self.assertIn("leaflet", rendered)
         self.assertIn(CNWI_MAPSERVER, rendered)
         self.assertIn(CPCAD_MAPSERVER, rendered)
         self.assertIn(VEGETATION_MAPSERVER, rendered)

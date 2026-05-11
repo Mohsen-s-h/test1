@@ -688,13 +688,14 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
     const services = {services_json};
 
     function escapeHtml(value) {{
-      return String(value).replace(/[&<>"']/g, (character) => ({{
+      const replacements = {{
         "&": "&amp;",
         "<": "&lt;",
         ">": "&gt;",
-        "\\"": "&quot;",
+        '"': "&quot;",
         "'": "&#39;"
-      }}[character]));
+      }};
+      return String(value).replace(/[&<>"']/g, (character) => replacements[character]);
     }}
 
     document.getElementById("location-card").innerHTML = `
