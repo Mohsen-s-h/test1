@@ -38,28 +38,34 @@ geometry because some LIO layers time out or reject exact polygon queries.
 
 If no argument is supplied, the script prompts for a location interactively.
 
-After the text report, the script also saves an interactive HTML map in the
-current directory. The map is centered on the checked point or submitted polygon
-and includes toggleable layers for:
+After the text report, the script saves a static SVG map image in the current
+directory. The image is centered on the checked point or submitted polygon and
+draws all overlapping layers:
 
 - Ontario wetlands
 - Ontario wooded areas
 - provincial parks and conservation reserves
 - Areas of Natural and Scientific Interest (ANSI) and Crown Game Preserves
 
-Open the generated `.html` file in a browser to view the map. You can choose
-the output path or skip map generation:
+Open the generated `.svg` file in a browser or image viewer. You can choose the
+output path or skip image generation:
 
 ```bash
-python3 canada_zone_checker.py "43.274037, -79.922389" --map-output cootes_map.html
+python3 canada_zone_checker.py "43.274037, -79.922389" --map-output cootes_map.svg
 python3 canada_zone_checker.py "43.274037, -79.922389" --no-map
 ```
 
 If you are running on a computer with a graphical browser, you can ask Python to
-open the generated map automatically:
+open the generated image automatically:
 
 ```bash
 python3 canada_zone_checker.py "43.274037, -79.922389" --open-map
+```
+
+If you still want the interactive HTML version for debugging, add:
+
+```bash
+python3 canada_zone_checker.py "43.274037, -79.922389" --html-output debug_map.html
 ```
 
 ## Notes

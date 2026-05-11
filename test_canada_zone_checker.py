@@ -13,6 +13,7 @@ from canada_zone_checker import (
     ZoneCheckError,
     ZoneResult,
     arcgis_geometry,
+    default_image_path,
     default_map_path,
     format_area_hectares,
     http_json,
@@ -20,11 +21,14 @@ from canada_zone_checker import (
     parse_coordinate_pair,
     parse_polygon_coordinates,
     render_map_html,
+    render_static_map_svg,
     resolve_polygon,
+    safe_image_filename,
     safe_map_filename,
     status_word,
     Location,
     write_map_html,
+    write_static_map_image,
 )
 
 
@@ -123,6 +127,12 @@ class OntarioZoneCheckerTests(unittest.TestCase):
 
         self.assertEqual(default_map_path(location).suffix, ".html")
 
+    def test_static_image_filename_uses_svg(self):
+        location = Location("Cootes Paradise / Hamilton, ON", 43.274037, -79.922389, "test")
+
+        self.assertTrue(safe_image_filename(location).endswith("43.27404_-79.92239.svg"))
+        self.assertEqual(default_image_path(location).suffix, ".svg")
+
     def test_render_map_html_includes_services_and_results(self):
         location = Location("Example <Place>", 43.274037, -79.922389, "test")
         results = [
@@ -165,6 +175,66 @@ class OntarioZoneCheckerTests(unittest.TestCase):
 
             self.assertEqual(written_path, output_path.resolve())
             self.assertIn("Wooded/forest area", written_path.read_text(encoding="utf-8"))
+
+    def test_render_static_map_svg_includes_layers_and_status(self):
+        location = resolve_polygon(
+            "43.273, -79.923; 43.273, -79.921; 43.275, -79.921; 43.275, -79.923"
+        )
+        overlays = [
+            {
+                "label": "Wetland overlaps",
+                "source": "test",
+                "color": "#0284c7",
+                "fillColor": "#38bdf8",
+                "featureCollection": {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "wetland"},
+                            "geometry": {
+                                "type": "Polygon",
+                                "coordinates": [
+                                    [
+                                        [-79.9225, 43.2735],
+                                        [-79.9215, 43.2735],
+                                        [-79.9215, 43.2745],
+                                        [-79.9225, 43.2745],
+                                        [-79.9225, 43.2735],
+                                    ]
+                                ],
+                            },
+                        }
+                    ],
+                },
+                "error": None,
+            }
+        ]
+
+        rendered = render_static_map_svg(
+            location,
+            [ZoneResult("Wetland", True, "source", ["detail"])],
+            overlays,
+        )
+
+        self.assertIn("<svg", rendered)
+        self.assertIn("Wetland overlaps", rendered)
+        self.assertIn("Wetland: YES", rendered)
+
+    def test_write_static_map_image_writes_svg(self):
+        location = Location("Example", 45.0, -75.0, "test")
+
+        with TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "map.png"
+            written_path = write_static_map_image(
+                location,
+                [ZoneResult("Wetland", False, "source", [])],
+                [],
+                output_path,
+            )
+
+            self.assertEqual(written_path.suffix, ".svg")
+            self.assertIn("<svg", written_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

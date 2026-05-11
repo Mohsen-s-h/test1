@@ -708,10 +708,26 @@ def safe_map_filename(location: Location) -> str:
     return f"zone_map_{label}_{location.latitude:.5f}_{location.longitude:.5f}.html"
 
 
+def safe_image_filename(location: Location) -> str:
+    """Build a portable default static image filename for a location."""
+
+    label = re.sub(r"[^A-Za-z0-9._-]+", "_", location.label).strip("_")
+    if not label:
+        label = "location"
+    label = label[:50].strip("_") or "location"
+    return f"zone_map_{label}_{location.latitude:.5f}_{location.longitude:.5f}.svg"
+
+
 def default_map_path(location: Location) -> Path:
     """Return the default output path for a generated map."""
 
     return Path(safe_map_filename(location)).resolve()
+
+
+def default_image_path(location: Location) -> Path:
+    """Return the default output path for a generated static map image."""
+
+    return Path(safe_image_filename(location)).resolve()
 
 
 def result_summary_for_map(results: list[ZoneResult]) -> list[dict[str, Any]]:
@@ -855,6 +871,290 @@ def build_map_feature_overlays(location: Location) -> list[dict[str, Any]]:
             }
         )
     return overlays
+
+
+def iter_geojson_positions(geometry: dict[str, Any]) -> list[tuple[float, float]]:
+    """Return lon/lat positions from a GeoJSON geometry."""
+
+    geometry_type = geometry.get("type")
+    coordinates = geometry.get("coordinates")
+    positions: list[tuple[float, float]] = []
+
+    def walk(value: Any) -> None:
+        if (
+            isinstance(value, list)
+            and len(value) >= 2
+            and isinstance(value[0], (int, float))
+            and isinstance(value[1], (int, float))
+        ):
+            positions.append((float(value[0]), float(value[1])))
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    if geometry_type == "GeometryCollection":
+        for sub_geometry in geometry.get("geometries", []):
+            positions.extend(iter_geojson_positions(sub_geometry))
+    else:
+        walk(coordinates)
+    return positions
+
+
+def map_bounds(
+    location: Location,
+    feature_overlays: list[dict[str, Any]],
+) -> dict[str, float]:
+    """Compute lon/lat bounds for static map rendering."""
+
+    positions: list[tuple[float, float]] = []
+    if location.polygon_vertices:
+        positions.extend((longitude, latitude) for latitude, longitude in location.polygon_vertices)
+    else:
+        positions.append((location.longitude, location.latitude))
+
+    for overlay in feature_overlays:
+        features = overlay.get("featureCollection", {}).get("features", [])
+        for feature in features:
+            positions.extend(iter_geojson_positions(feature.get("geometry", {})))
+
+    if not positions:
+        positions.append((location.longitude, location.latitude))
+
+    longitudes = [position[0] for position in positions]
+    latitudes = [position[1] for position in positions]
+    min_lon = min(longitudes)
+    max_lon = max(longitudes)
+    min_lat = min(latitudes)
+    max_lat = max(latitudes)
+    lon_pad = max((max_lon - min_lon) * 0.12, 0.002)
+    lat_pad = max((max_lat - min_lat) * 0.12, 0.002)
+    return {
+        "min_lon": min_lon - lon_pad,
+        "max_lon": max_lon + lon_pad,
+        "min_lat": min_lat - lat_pad,
+        "max_lat": max_lat + lat_pad,
+    }
+
+
+def svg_points(points: list[tuple[float, float]]) -> str:
+    """Convert projected points to an SVG point string."""
+
+    return " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+
+
+def render_geojson_geometry_svg(
+    geometry: dict[str, Any],
+    project: Any,
+    color: str,
+    fill_color: str,
+    opacity: float = 0.28,
+) -> str:
+    """Render a GeoJSON geometry as SVG elements."""
+
+    geometry_type = geometry.get("type")
+    coordinates = geometry.get("coordinates")
+    if not geometry_type or coordinates is None:
+        return ""
+
+    def project_ring(ring: list[list[float]]) -> list[tuple[float, float]]:
+        return [project(float(lon), float(lat)) for lon, lat, *_ in ring]
+
+    elements: list[str] = []
+    if geometry_type == "Polygon":
+        for ring_index, ring in enumerate(coordinates):
+            points = svg_points(project_ring(ring))
+            fill = fill_color if ring_index == 0 else "#ffffff"
+            elements.append(
+                f'<polygon points="{points}" fill="{fill}" fill-opacity="{opacity}" '
+                f'stroke="{color}" stroke-width="2" stroke-opacity="0.95" />'
+            )
+    elif geometry_type == "MultiPolygon":
+        for polygon in coordinates:
+            elements.append(
+                render_geojson_geometry_svg(
+                    {"type": "Polygon", "coordinates": polygon},
+                    project,
+                    color,
+                    fill_color,
+                    opacity,
+                )
+            )
+    elif geometry_type == "LineString":
+        points = svg_points(project_ring(coordinates))
+        elements.append(
+            f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2" />'
+        )
+    elif geometry_type == "MultiLineString":
+        for line in coordinates:
+            elements.append(
+                render_geojson_geometry_svg(
+                    {"type": "LineString", "coordinates": line},
+                    project,
+                    color,
+                    fill_color,
+                    opacity,
+                )
+            )
+    elif geometry_type == "Point":
+        x, y = project(float(coordinates[0]), float(coordinates[1]))
+        elements.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="{fill_color}" '
+            f'stroke="{color}" stroke-width="2" />'
+        )
+    elif geometry_type == "MultiPoint":
+        for point in coordinates:
+            elements.append(
+                render_geojson_geometry_svg(
+                    {"type": "Point", "coordinates": point},
+                    project,
+                    color,
+                    fill_color,
+                    opacity,
+                )
+            )
+    elif geometry_type == "GeometryCollection":
+        for sub_geometry in geometry.get("geometries", []):
+            elements.append(
+                render_geojson_geometry_svg(
+                    sub_geometry,
+                    project,
+                    color,
+                    fill_color,
+                    opacity,
+                )
+            )
+    return "\n".join(element for element in elements if element)
+
+
+def render_static_map_svg(
+    location: Location,
+    results: list[ZoneResult],
+    feature_overlays: list[dict[str, Any]],
+    width: int = 1400,
+    height: int = 950,
+) -> str:
+    """Render a static SVG map image with all returned layers visible."""
+
+    bounds = map_bounds(location, feature_overlays)
+    map_x = 40
+    map_y = 92
+    map_width = width - 410
+    map_height = height - 145
+    lon_span = max(bounds["max_lon"] - bounds["min_lon"], 0.000001)
+    lat_span = max(bounds["max_lat"] - bounds["min_lat"], 0.000001)
+
+    def project(lon: float, lat: float) -> tuple[float, float]:
+        x = map_x + ((lon - bounds["min_lon"]) / lon_span) * map_width
+        y = map_y + ((bounds["max_lat"] - lat) / lat_span) * map_height
+        return x, y
+
+    layer_elements: list[str] = []
+    for overlay in feature_overlays:
+        features = overlay.get("featureCollection", {}).get("features", [])
+        for feature in features:
+            layer_elements.append(
+                render_geojson_geometry_svg(
+                    feature.get("geometry", {}),
+                    project,
+                    overlay["color"],
+                    overlay["fillColor"],
+                )
+            )
+
+    submitted_elements = []
+    if location.polygon_vertices:
+        submitted_points = [
+            project(longitude, latitude) for latitude, longitude in location.polygon_vertices
+        ]
+        submitted_elements.append(
+            f'<polygon points="{svg_points(submitted_points)}" fill="#ffffff" '
+            f'fill-opacity="0.12" stroke="#111827" stroke-width="4" '
+            f'stroke-dasharray="12 8" />'
+        )
+    else:
+        x, y = project(location.longitude, location.latitude)
+        submitted_elements.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="9" fill="#111827" stroke="#ffffff" '
+            f'stroke-width="3" />'
+        )
+
+    grid_elements = []
+    for index in range(1, 5):
+        x = map_x + (map_width / 5) * index
+        y = map_y + (map_height / 5) * index
+        grid_elements.append(
+            f'<line x1="{x:.1f}" y1="{map_y}" x2="{x:.1f}" y2="{map_y + map_height}" '
+            f'stroke="#cbd5e1" stroke-width="1" />'
+        )
+        grid_elements.append(
+            f'<line x1="{map_x}" y1="{y:.1f}" x2="{map_x + map_width}" y2="{y:.1f}" '
+            f'stroke="#cbd5e1" stroke-width="1" />'
+        )
+
+    legend_x = map_x + map_width + 35
+    legend_y = map_y
+    legend_rows = []
+    for index, overlay in enumerate(feature_overlays):
+        count = len(overlay.get("featureCollection", {}).get("features", []))
+        y = legend_y + 62 + index * 54
+        label = html.escape(overlay["label"])
+        error = " (error)" if overlay.get("error") else ""
+        legend_rows.append(
+            f'<rect x="{legend_x}" y="{y}" width="28" height="18" rx="4" '
+            f'fill="{overlay["fillColor"]}" fill-opacity="0.55" stroke="{overlay["color"]}" />'
+        )
+        legend_rows.append(
+            f'<text x="{legend_x + 40}" y="{y + 14}" class="legend">{label}: '
+            f'{count} feature{"s" if count != 1 else ""}{error}</text>'
+        )
+
+    status_rows = []
+    for index, result in enumerate(results):
+        y = legend_y + 340 + index * 42
+        status = status_word(result.matched)
+        status_rows.append(
+            f'<text x="{legend_x}" y="{y}" class="status-line">'
+            f'{html.escape(result.zone)}: {status}</text>'
+        )
+
+    title = html.escape(f"Ontario GeoHub assessment - {location.label}")
+    subtitle = (
+        "Static overlap image. Submitted polygon is dashed black; Ontario layer overlaps are colored."
+        if location.is_polygon
+        else "Static overlap image. Checked point is black; Ontario layer overlaps are colored."
+    )
+    coord_text = (
+        f"Map center: {location.latitude:.6f}, {location.longitude:.6f}"
+        if location.is_polygon
+        else f"Point: {location.latitude:.6f}, {location.longitude:.6f}"
+    )
+
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <style>
+    .title {{ font: 700 28px Arial, sans-serif; fill: #0f172a; }}
+    .subtitle {{ font: 16px Arial, sans-serif; fill: #475569; }}
+    .legend-title {{ font: 700 20px Arial, sans-serif; fill: #0f172a; }}
+    .legend {{ font: 15px Arial, sans-serif; fill: #1f2937; }}
+    .status-line {{ font: 700 16px Arial, sans-serif; fill: #111827; }}
+    .small {{ font: 13px Arial, sans-serif; fill: #64748b; }}
+  </style>
+  <rect width="100%" height="100%" fill="#f8fafc" />
+  <text x="40" y="42" class="title">{title}</text>
+  <text x="40" y="70" class="subtitle">{html.escape(subtitle)}</text>
+  <rect x="{map_x}" y="{map_y}" width="{map_width}" height="{map_height}" rx="18" fill="#eef6ef" stroke="#94a3b8" stroke-width="2" />
+  <g opacity="0.75">{"".join(grid_elements)}</g>
+  <g>{"".join(layer_elements)}</g>
+  <g>{"".join(submitted_elements)}</g>
+  <rect x="{legend_x - 18}" y="{legend_y}" width="340" height="{map_height}" rx="18" fill="#ffffff" stroke="#d9e2ec" />
+  <text x="{legend_x}" y="{legend_y + 34}" class="legend-title">Visible layers</text>
+  {"".join(legend_rows)}
+  <text x="{legend_x}" y="{legend_y + 300}" class="legend-title">Assessment</text>
+  {"".join(status_rows)}
+  <text x="{legend_x}" y="{legend_y + map_height - 70}" class="small">{html.escape(coord_text)}</text>
+  <text x="{legend_x}" y="{legend_y + map_height - 48}" class="small">Source: Ontario GeoHub / LIO</text>
+  <text x="{legend_x}" y="{legend_y + map_height - 26}" class="small">Generated by canada_zone_checker.py</text>
+</svg>
+"""
 
 
 def render_map_html(
@@ -1232,6 +1532,25 @@ def write_map_html(
     return path
 
 
+def write_static_map_image(
+    location: Location,
+    results: list[ZoneResult],
+    feature_overlays: list[dict[str, Any]],
+    output_path: Path | str | None = None,
+) -> Path:
+    """Write a static SVG map image and return its absolute path."""
+
+    path = Path(output_path).expanduser() if output_path else default_image_path(location)
+    if path.suffix.lower() not in {".svg", ""}:
+        path = path.with_suffix(".svg")
+    elif not path.suffix:
+        path = path.with_suffix(".svg")
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_static_map_svg(location, results, feature_overlays), encoding="utf-8")
+    return path
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build command-line arguments."""
 
@@ -1257,19 +1576,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--map-output",
         default=None,
         help=(
-            "Path for the generated interactive HTML map. Defaults to a "
-            "zone_map_<location>.html file in the current directory."
+            "Path for the generated static SVG map image. Defaults to a "
+            "zone_map_<location>.svg file in the current directory."
         ),
+    )
+    parser.add_argument(
+        "--html-output",
+        default=None,
+        help="Optional path for also writing the old interactive HTML map.",
     )
     parser.add_argument(
         "--no-map",
         action="store_true",
-        help="Only print the text report; do not generate the interactive map.",
+        help="Only print the text report; do not generate the static map image.",
     )
     parser.add_argument(
         "--open-map",
         action="store_true",
-        help="Open the generated map in the default web browser.",
+        help="Open the generated static SVG image in the default viewer/browser.",
     )
     return parser
 
@@ -1297,15 +1621,32 @@ def main(argv: list[str] | None = None) -> int:
     print_report(location, results)
     if not args.no_map:
         feature_overlays = build_map_feature_overlays(location)
-        map_path = write_map_html(
+        map_path = write_static_map_image(
             location,
             results,
+            feature_overlays,
             args.map_output,
-            feature_overlays=feature_overlays,
         )
-        print(f"\nInteractive map saved to: {map_path}")
+        print(f"\nStatic map image saved to: {map_path}")
+        if args.html_output:
+            html_path = write_map_html(
+                location,
+                results,
+                args.html_output,
+                feature_overlays=feature_overlays,
+            )
+            print(f"Interactive HTML map also saved to: {html_path}")
         if args.open_map:
             webbrowser.open(map_path.as_uri())
+    elif args.html_output:
+        feature_overlays = build_map_feature_overlays(location)
+        html_path = write_map_html(
+            location,
+            results,
+            args.html_output,
+            feature_overlays=feature_overlays,
+        )
+        print(f"\nInteractive HTML map saved to: {html_path}")
     return 0
 
 
