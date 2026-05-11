@@ -8,25 +8,30 @@ uses public web APIs only and requires no third-party Python packages.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
 USER_AGENT = "canada-zone-checker/1.0 (public API example)"
 
 CNWI_MAPSERVER = "https://maps-cartes.ec.gc.ca/arcgis/rest/services/CWS_SCF/CNWI/MapServer"
-CPCAD_LAYER = "https://maps-cartes.ec.gc.ca/arcgis/rest/services/CWS_SCF/CPCAD/MapServer/0"
+CPCAD_MAPSERVER = "https://maps-cartes.ec.gc.ca/arcgis/rest/services/CWS_SCF/CPCAD/MapServer"
+CPCAD_LAYER = f"{CPCAD_MAPSERVER}/0"
 LAND_COVER_MAPSERVER = "https://geoappext.nrcan.gc.ca/arcgis/rest/services/FGP/LandCover_EN/MapServer"
-VEGETATION_LAYER = (
+VEGETATION_MAPSERVER = (
     "https://maps-cartes.services.geo.ca/server_serveur/rest/services/"
-    "NRCan/vegetation_zones_of_canada_2020_en/MapServer/0"
+    "NRCan/vegetation_zones_of_canada_2020_en/MapServer"
 )
+VEGETATION_LAYER = f"{VEGETATION_MAPSERVER}/0"
 NOMINATIM_SEARCH = "https://nominatim.openstreetmap.org/search"
 
 
@@ -491,6 +496,313 @@ def print_report(location: Location, results: list[ZoneResult]) -> None:
     )
 
 
+def safe_map_filename(location: Location) -> str:
+    """Build a portable default map filename for a location."""
+
+    label = re.sub(r"[^A-Za-z0-9._-]+", "_", location.label).strip("_")
+    if not label:
+        label = "location"
+    label = label[:50].strip("_") or "location"
+    return f"zone_map_{label}_{location.latitude:.5f}_{location.longitude:.5f}.html"
+
+
+def default_map_path(location: Location) -> Path:
+    """Return the default output path for a generated map."""
+
+    return Path(safe_map_filename(location)).resolve()
+
+
+def result_summary_for_map(results: list[ZoneResult]) -> list[dict[str, Any]]:
+    """Return JSON-serializable check results for the map sidebar."""
+
+    return [
+        {
+            "zone": result.zone,
+            "status": status_word(result.matched),
+            "source": result.source,
+            "details": result.details,
+            "error": result.error,
+        }
+        for result in results
+    ]
+
+
+def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 13) -> str:
+    """Render a standalone interactive HTML map for the checked location."""
+
+    location_data = {
+        "label": location.label,
+        "latitude": location.latitude,
+        "longitude": location.longitude,
+        "source": location.source,
+    }
+    service_data = {
+        "cnwi": CNWI_MAPSERVER,
+        "cpcad": CPCAD_MAPSERVER,
+        "landCover": LAND_COVER_MAPSERVER,
+        "vegetation": VEGETATION_MAPSERVER,
+    }
+    location_json = json.dumps(location_data, ensure_ascii=True)
+    results_json = json.dumps(result_summary_for_map(results), ensure_ascii=True)
+    services_json = json.dumps(service_data, ensure_ascii=True)
+    title = html.escape(f"Zone map for {location.label}")
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIINfQH8fL3pFfF7hdE5Pzu8mpYB2lMAFIk="
+    crossorigin=""
+  >
+  <style>
+    body {{
+      font-family: Arial, Helvetica, sans-serif;
+      margin: 0;
+      color: #1f2933;
+      background: #f5f7fa;
+    }}
+    header {{
+      padding: 16px 20px;
+      background: #12355b;
+      color: white;
+    }}
+    header h1 {{
+      margin: 0 0 6px;
+      font-size: 1.35rem;
+    }}
+    header p {{
+      margin: 0;
+      font-size: 0.95rem;
+    }}
+    main {{
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) 1fr;
+      min-height: calc(100vh - 76px);
+    }}
+    aside {{
+      padding: 16px;
+      overflow: auto;
+      border-right: 1px solid #d9e2ec;
+      background: white;
+    }}
+    #map {{
+      min-height: 620px;
+      height: calc(100vh - 76px);
+    }}
+    .card {{
+      border: 1px solid #d9e2ec;
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: #ffffff;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+    }}
+    .card h2 {{
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }}
+    .status {{
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 0.78rem;
+      letter-spacing: 0.03em;
+    }}
+    .YES {{ background: #d3f9d8; color: #1b5e20; }}
+    .NO {{ background: #ffe3e3; color: #9b1c1c; }}
+    .UNKNOWN {{ background: #fff3bf; color: #7c5c00; }}
+    .detail {{
+      margin: 6px 0;
+      line-height: 1.35;
+    }}
+    .small {{
+      color: #52606d;
+      font-size: 0.85rem;
+    }}
+    .legend-item {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 6px 0;
+    }}
+    .swatch {{
+      width: 18px;
+      height: 12px;
+      border: 1px solid #52606d;
+      opacity: 0.8;
+    }}
+    @media (max-width: 850px) {{
+      main {{
+        grid-template-columns: 1fr;
+      }}
+      aside {{
+        border-right: 0;
+        border-bottom: 1px solid #d9e2ec;
+      }}
+      #map {{
+        height: 70vh;
+        min-height: 440px;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{title}</h1>
+    <p>Interactive feasibility map with public Canadian wetland, forest/vegetation, land-cover, and protected-area layers.</p>
+  </header>
+  <main>
+    <aside>
+      <section class="card" id="location-card"></section>
+      <section id="results"></section>
+      <section class="card">
+        <h2>Layer guide</h2>
+        <div class="legend-item"><span class="swatch" style="background:#4dabf7"></span>CNWI detailed wetlands</div>
+        <div class="legend-item"><span class="swatch" style="background:#51cf66"></span>Vegetation / forest zones</div>
+        <div class="legend-item"><span class="swatch" style="background:#ffd43b"></span>NRCan land-cover raster</div>
+        <div class="legend-item"><span class="swatch" style="background:#ff6b6b"></span>CPCAD protected/conserved areas</div>
+        <p class="small">Use the layer control on the map to turn layers on or off. Some services only draw at certain zoom levels.</p>
+      </section>
+      <section class="card">
+        <h2>Important note</h2>
+        <p class="small">Protected/conserved areas are shown as a practical national proxy for restricted zones. Always confirm legal restrictions with the responsible authority.</p>
+      </section>
+    </aside>
+    <div id="map"></div>
+  </main>
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin="">
+  </script>
+  <script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
+  <script>
+    const locationData = {location_json};
+    const zoneResults = {results_json};
+    const services = {services_json};
+
+    function escapeHtml(value) {{
+      return String(value).replace(/[&<>"']/g, (character) => ({{
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\\"": "&quot;",
+        "'": "&#39;"
+      }}[character]));
+    }}
+
+    document.getElementById("location-card").innerHTML = `
+      <h2>Checked location</h2>
+      <p class="detail"><strong>${{escapeHtml(locationData.label)}}</strong></p>
+      <p class="detail">Latitude: ${{locationData.latitude.toFixed(6)}}<br>Longitude: ${{locationData.longitude.toFixed(6)}}</p>
+      <p class="small">Resolved by: ${{escapeHtml(locationData.source)}}</p>
+    `;
+
+    document.getElementById("results").innerHTML = zoneResults.map((result) => `
+      <article class="card">
+        <h2>${{escapeHtml(result.zone)}} <span class="status ${{result.status}}">${{result.status}}</span></h2>
+        <p class="small">Source: ${{escapeHtml(result.source)}}</p>
+        ${{result.error ? `<p class="detail"><strong>Error:</strong> ${{escapeHtml(result.error)}}</p>` : ""}}
+        ${{result.details.map((detail) => `<p class="detail">${{escapeHtml(detail)}}</p>`).join("")}}
+      </article>
+    `).join("");
+
+    const map = L.map("map").setView([locationData.latitude, locationData.longitude], {zoom});
+    const osm = L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png", {{
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors"
+    }}).addTo(map);
+
+    const imagery = L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}",
+      {{
+        maxZoom: 19,
+        attribution: "Tiles &copy; Esri"
+      }}
+    );
+
+    const wetlands = L.esri.dynamicMapLayer({{
+      url: services.cnwi,
+      layers: [1],
+      opacity: 0.58,
+      attribution: "ECCC CNWI"
+    }});
+
+    const forestZones = L.esri.dynamicMapLayer({{
+      url: services.vegetation,
+      layers: [0],
+      opacity: 0.42,
+      attribution: "NRCan Vegetation Zones"
+    }}).addTo(map);
+
+    const landCover = L.esri.dynamicMapLayer({{
+      url: services.landCover,
+      layers: [0],
+      opacity: 0.35,
+      attribution: "NRCan Land Cover"
+    }});
+
+    const protectedAreas = L.esri.dynamicMapLayer({{
+      url: services.cpcad,
+      layers: [0],
+      opacity: 0.62,
+      attribution: "ECCC CPCAD"
+    }}).addTo(map);
+
+    const marker = L.marker([locationData.latitude, locationData.longitude])
+      .addTo(map)
+      .bindPopup(`<strong>${{escapeHtml(locationData.label)}}</strong><br>${{locationData.latitude.toFixed(6)}}, ${{locationData.longitude.toFixed(6)}}`)
+      .openPopup();
+
+    const oneKmRadius = L.circle([locationData.latitude, locationData.longitude], {{
+      radius: 1000,
+      color: "#1c7ed6",
+      weight: 2,
+      fillColor: "#74c0fc",
+      fillOpacity: 0.08
+    }}).addTo(map);
+
+    L.control.layers(
+      {{
+        "OpenStreetMap": osm,
+        "Esri World Imagery": imagery
+      }},
+      {{
+        "CNWI detailed wetlands": wetlands,
+        "Vegetation / forest zones": forestZones,
+        "NRCan land-cover raster": landCover,
+        "CPCAD protected/conserved areas": protectedAreas,
+        "1 km context radius": oneKmRadius,
+        "Checked location marker": marker
+      }},
+      {{ collapsed: false }}
+    ).addTo(map);
+  </script>
+</body>
+</html>
+"""
+
+
+def write_map_html(
+    location: Location,
+    results: list[ZoneResult],
+    output_path: Path | str | None = None,
+) -> Path:
+    """Write an interactive map HTML file and return its absolute path."""
+
+    path = Path(output_path).expanduser() if output_path else default_map_path(location)
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_map_html(location, results), encoding="utf-8")
+    return path
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build command-line arguments."""
 
@@ -504,6 +816,24 @@ def build_parser() -> argparse.ArgumentParser:
         "location",
         nargs="?",
         help="Address/place in Canada, or coordinates as 'latitude, longitude'.",
+    )
+    parser.add_argument(
+        "--map-output",
+        default=None,
+        help=(
+            "Path for the generated interactive HTML map. Defaults to a "
+            "zone_map_<location>.html file in the current directory."
+        ),
+    )
+    parser.add_argument(
+        "--no-map",
+        action="store_true",
+        help="Only print the text report; do not generate the interactive map.",
+    )
+    parser.add_argument(
+        "--open-map",
+        action="store_true",
+        help="Open the generated map in the default web browser.",
     )
     return parser
 
@@ -527,6 +857,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print_report(location, results)
+    if not args.no_map:
+        map_path = write_map_html(location, results, args.map_output)
+        print(f"\nInteractive map saved to: {map_path}")
+        if args.open_map:
+            webbrowser.open(map_path.as_uri())
     return 0
 
 
