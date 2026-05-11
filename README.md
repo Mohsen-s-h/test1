@@ -39,8 +39,8 @@ geometry because some LIO layers time out or reject exact polygon queries.
 If no argument is supplied, the script prompts for a location interactively.
 
 After the text report, the script saves a static SVG map image in the current
-directory. The image is centered on the checked point or submitted polygon and
-draws all overlapping layers:
+directory. The image includes an OpenStreetMap basemap, is centered on the
+checked point or submitted polygon, and draws all overlapping layers:
 
 - Ontario wetlands
 - Ontario wooded areas

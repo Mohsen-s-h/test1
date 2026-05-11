@@ -220,6 +220,7 @@ class OntarioZoneCheckerTests(unittest.TestCase):
         self.assertIn("<svg", rendered)
         self.assertIn("Wetland overlaps", rendered)
         self.assertIn("Wetland: YES", rendered)
+        self.assertIn("Basemap: OpenStreetMap", rendered)
 
     def test_write_static_map_image_writes_svg(self):
         location = Location("Example", 45.0, -75.0, "test")

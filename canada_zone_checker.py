@@ -9,8 +9,10 @@ third-party Python packages.
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
+import math
 import re
 import socket
 import sys
@@ -942,6 +944,88 @@ def svg_points(points: list[tuple[float, float]]) -> str:
     return " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
 
 
+def lonlat_to_world_pixel(lon: float, lat: float, zoom: int) -> tuple[float, float]:
+    """Project lon/lat to Web Mercator world pixel coordinates."""
+
+    tile_size = 256
+    scale = tile_size * (2**zoom)
+    clamped_lat = max(min(lat, 85.05112878), -85.05112878)
+    sin_lat = math.sin(math.radians(clamped_lat))
+    x = (lon + 180.0) / 360.0 * scale
+    y = (0.5 - math.log((1 + sin_lat) / (1 - sin_lat)) / (4 * math.pi)) * scale
+    return x, y
+
+
+def choose_static_zoom(bounds: dict[str, float], map_width: int, map_height: int) -> int:
+    """Choose a slippy-map zoom level that fits the assessed geometry."""
+
+    for zoom in range(18, 4, -1):
+        min_x, max_y = lonlat_to_world_pixel(bounds["min_lon"], bounds["min_lat"], zoom)
+        max_x, min_y = lonlat_to_world_pixel(bounds["max_lon"], bounds["max_lat"], zoom)
+        if (max_x - min_x) <= map_width * 0.76 and (max_y - min_y) <= map_height * 0.76:
+            return zoom
+    return 5
+
+
+def fetch_osm_tile_data_uri(zoom: int, x: int, y: int) -> str | None:
+    """Fetch one OpenStreetMap tile as a data URI for embedding in SVG."""
+
+    max_tile = 2**zoom
+    if y < 0 or y >= max_tile:
+        return None
+    wrapped_x = x % max_tile
+    url = f"https://tile.openstreetmap.org/{zoom}/{wrapped_x}/{y}.png"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "image/png",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            encoded = base64.b64encode(response.read()).decode("ascii")
+    except (TimeoutError, socket.timeout, urllib.error.URLError, urllib.error.HTTPError):
+        return None
+    return f"data:image/png;base64,{encoded}"
+
+
+def render_osm_tile_background(
+    zoom: int,
+    view_left: float,
+    view_top: float,
+    map_x: int,
+    map_y: int,
+    map_width: int,
+    map_height: int,
+) -> str:
+    """Render OSM tiles that cover the static SVG map viewport."""
+
+    tile_size = 256
+    start_x = math.floor(view_left / tile_size)
+    end_x = math.floor((view_left + map_width) / tile_size)
+    start_y = math.floor(view_top / tile_size)
+    end_y = math.floor((view_top + map_height) / tile_size)
+    elements: list[str] = []
+    for tile_y in range(start_y, end_y + 1):
+        for tile_x in range(start_x, end_x + 1):
+            data_uri = fetch_osm_tile_data_uri(zoom, tile_x, tile_y)
+            if not data_uri:
+                continue
+            image_x = map_x + tile_x * tile_size - view_left
+            image_y = map_y + tile_y * tile_size - view_top
+            elements.append(
+                f'<image href="{data_uri}" x="{image_x:.1f}" y="{image_y:.1f}" '
+                f'width="{tile_size}" height="{tile_size}" />'
+            )
+    if elements:
+        return "\n".join(elements)
+    return (
+        f'<rect x="{map_x}" y="{map_y}" width="{map_width}" height="{map_height}" '
+        f'fill="#e5efe6" />'
+    )
+
+
 def render_geojson_geometry_svg(
     geometry: dict[str, Any],
     project: Any,
@@ -1040,13 +1124,29 @@ def render_static_map_svg(
     map_y = 92
     map_width = width - 410
     map_height = height - 145
-    lon_span = max(bounds["max_lon"] - bounds["min_lon"], 0.000001)
-    lat_span = max(bounds["max_lat"] - bounds["min_lat"], 0.000001)
+    zoom = choose_static_zoom(bounds, map_width, map_height)
+    min_px, max_py = lonlat_to_world_pixel(bounds["min_lon"], bounds["min_lat"], zoom)
+    max_px, min_py = lonlat_to_world_pixel(bounds["max_lon"], bounds["max_lat"], zoom)
+    center_x = (min_px + max_px) / 2
+    center_y = (min_py + max_py) / 2
+    view_left = center_x - map_width / 2
+    view_top = center_y - map_height / 2
 
     def project(lon: float, lat: float) -> tuple[float, float]:
-        x = map_x + ((lon - bounds["min_lon"]) / lon_span) * map_width
-        y = map_y + ((bounds["max_lat"] - lat) / lat_span) * map_height
+        pixel_x, pixel_y = lonlat_to_world_pixel(lon, lat, zoom)
+        x = map_x + pixel_x - view_left
+        y = map_y + pixel_y - view_top
         return x, y
+
+    basemap = render_osm_tile_background(
+        zoom,
+        view_left,
+        view_top,
+        map_x,
+        map_y,
+        map_width,
+        map_height,
+    )
 
     layer_elements: list[str] = []
     for overlay in feature_overlays:
@@ -1141,18 +1241,22 @@ def render_static_map_svg(
   <rect width="100%" height="100%" fill="#f8fafc" />
   <text x="40" y="42" class="title">{title}</text>
   <text x="40" y="70" class="subtitle">{html.escape(subtitle)}</text>
-  <rect x="{map_x}" y="{map_y}" width="{map_width}" height="{map_height}" rx="18" fill="#eef6ef" stroke="#94a3b8" stroke-width="2" />
-  <g opacity="0.75">{"".join(grid_elements)}</g>
-  <g>{"".join(layer_elements)}</g>
-  <g>{"".join(submitted_elements)}</g>
+  <clipPath id="mapClip"><rect x="{map_x}" y="{map_y}" width="{map_width}" height="{map_height}" rx="18" /></clipPath>
+  <g clip-path="url(#mapClip)">
+    {basemap}
+    <g opacity="0.45">{"".join(grid_elements)}</g>
+    <g>{"".join(layer_elements)}</g>
+    <g>{"".join(submitted_elements)}</g>
+  </g>
+  <rect x="{map_x}" y="{map_y}" width="{map_width}" height="{map_height}" rx="18" fill="none" stroke="#334155" stroke-width="2" />
   <rect x="{legend_x - 18}" y="{legend_y}" width="340" height="{map_height}" rx="18" fill="#ffffff" stroke="#d9e2ec" />
   <text x="{legend_x}" y="{legend_y + 34}" class="legend-title">Visible layers</text>
   {"".join(legend_rows)}
   <text x="{legend_x}" y="{legend_y + 300}" class="legend-title">Assessment</text>
   {"".join(status_rows)}
   <text x="{legend_x}" y="{legend_y + map_height - 70}" class="small">{html.escape(coord_text)}</text>
-  <text x="{legend_x}" y="{legend_y + map_height - 48}" class="small">Source: Ontario GeoHub / LIO</text>
-  <text x="{legend_x}" y="{legend_y + map_height - 26}" class="small">Generated by canada_zone_checker.py</text>
+  <text x="{legend_x}" y="{legend_y + map_height - 48}" class="small">Basemap: OpenStreetMap, zoom {zoom}</text>
+  <text x="{legend_x}" y="{legend_y + map_height - 26}" class="small">Source: Ontario GeoHub / LIO</text>
 </svg>
 """
 
