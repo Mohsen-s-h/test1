@@ -65,8 +65,8 @@ class OntarioZoneCheckerTests(unittest.TestCase):
 
         self.assertTrue(location.is_polygon)
         self.assertAlmostEqual(location.latitude, 43.274)
-        self.assertEqual(geometry_type, "esriGeometryPolygon")
-        self.assertIn('"rings"', geometry)
+        self.assertEqual(geometry_type, "esriGeometryEnvelope")
+        self.assertIn('"xmin"', geometry)
 
     def test_format_area_hectares(self):
         self.assertEqual(format_area_hectares(12345), "1.23 ha")

@@ -32,6 +32,10 @@ vertices with semicolons; the script closes the polygon automatically:
 python3 canada_zone_checker.py --polygon "43.2735, -79.9230; 43.2735, -79.9200; 43.2760, -79.9200; 43.2760, -79.9230"
 ```
 
+The exact submitted polygon is shown on the generated map. For the Ontario
+GeoHub/LIO API calls, the script uses the polygon's bounding box as the query
+geometry because some LIO layers time out or reject exact polygon queries.
+
 If no argument is supplied, the script prompts for a location interactively.
 
 After the text report, the script also saves an interactive HTML map in the

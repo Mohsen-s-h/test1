@@ -305,11 +305,32 @@ def arcgis_polygon(vertices: tuple[tuple[float, float], ...]) -> str:
     )
 
 
+def arcgis_envelope(vertices: tuple[tuple[float, float], ...]) -> str:
+    """Build an ArcGIS REST envelope around polygon vertices in WGS84."""
+
+    bounds = polygon_bounds(vertices)
+    return json.dumps(
+        {
+            "xmin": bounds["min_lon"],
+            "ymin": bounds["min_lat"],
+            "xmax": bounds["max_lon"],
+            "ymax": bounds["max_lat"],
+            "spatialReference": {"wkid": 4326},
+        }
+    )
+
+
 def arcgis_geometry(location: Location) -> tuple[str, str]:
-    """Return ArcGIS geometry JSON and geometry type for a point or polygon."""
+    """Return ArcGIS query geometry JSON and geometry type for a point or area.
+
+    Some Ontario GeoHub/LIO layers time out or reject exact polygon query
+    geometries. For polygon inputs, use the polygon's bounding envelope as a
+    reliable overlap-screening geometry; the exact submitted polygon is still
+    drawn in the generated map.
+    """
 
     if location.polygon_vertices:
-        return arcgis_polygon(location.polygon_vertices), "esriGeometryPolygon"
+        return arcgis_envelope(location.polygon_vertices), "esriGeometryEnvelope"
     return arcgis_point(location.longitude, location.latitude), "esriGeometryPoint"
 
 
@@ -653,6 +674,7 @@ def print_report(location: Location, results: list[ZoneResult]) -> None:
     if location.polygon_vertices:
         print(f"  Geometry: polygon ({len(location.polygon_vertices)} vertices)")
         print(f"  Map center: {location.latitude:.6f}, {location.longitude:.6f}")
+        print("  Query geometry: bounding box of submitted polygon")
     else:
         print(f"  Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
     print(f"  Resolved by: {location.source}")
