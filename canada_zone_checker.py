@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Check whether a Canadian location intersects wetland, forest, or protected zones.
+"""Check whether an Ontario location intersects wetland, wooded, or protected zones.
 
-The script accepts either a latitude/longitude pair or a place/address string. It
-uses public web APIs only and requires no third-party Python packages.
+The script accepts either a latitude/longitude pair or a place/address string.
+It uses Ontario GeoHub/Land Information Ontario public APIs and requires no
+third-party Python packages.
 """
 
 from __future__ import annotations
@@ -21,51 +22,39 @@ from pathlib import Path
 from typing import Any
 
 
-USER_AGENT = "canada-zone-checker/1.0 (public API example)"
+USER_AGENT = "ontario-zone-checker/1.0 (public API example)"
 
-CNWI_MAPSERVER = "https://maps-cartes.ec.gc.ca/arcgis/rest/services/CWS_SCF/CNWI/MapServer"
-CPCAD_MAPSERVER = "https://maps-cartes.ec.gc.ca/arcgis/rest/services/CWS_SCF/CPCAD/MapServer"
-CPCAD_LAYER = f"{CPCAD_MAPSERVER}/0"
-LAND_COVER_MAPSERVER = "https://geoappext.nrcan.gc.ca/arcgis/rest/services/FGP/LandCover_EN/MapServer"
-VEGETATION_MAPSERVER = (
-    "https://maps-cartes.services.geo.ca/server_serveur/rest/services/"
-    "NRCan/vegetation_zones_of_canada_2020_en/MapServer"
+LIO_OPEN01_MAPSERVER = (
+    "https://ws.lioservices.lrc.gov.on.ca/arcgis2/rest/services/"
+    "LIO_OPEN_DATA/LIO_Open01/MapServer"
 )
-VEGETATION_LAYER = f"{VEGETATION_MAPSERVER}/0"
+LIO_OPEN03_MAPSERVER = (
+    "https://ws.lioservices.lrc.gov.on.ca/arcgis2/rest/services/"
+    "LIO_OPEN_DATA/LIO_Open03/MapServer"
+)
+LIO_OPEN05_MAPSERVER = (
+    "https://ws.lioservices.lrc.gov.on.ca/arcgis2/rest/services/"
+    "LIO_OPEN_DATA/LIO_Open05/MapServer"
+)
+LIO_OPEN07_MAPSERVER = (
+    "https://ws.lioservices.lrc.gov.on.ca/arcgis2/rest/services/"
+    "LIO_OPEN_DATA/LIO_Open07/MapServer"
+)
+ONTARIO_WETLAND_LAYER = f"{LIO_OPEN01_MAPSERVER}/15"
+ONTARIO_CONSERVATION_RESERVE_LAYER = f"{LIO_OPEN03_MAPSERVER}/2"
+ONTARIO_PROVINCIAL_PARK_LAYER = f"{LIO_OPEN03_MAPSERVER}/4"
+ONTARIO_ANSI_LAYER = f"{LIO_OPEN05_MAPSERVER}/3"
+ONTARIO_CROWN_GAME_PRESERVE_LAYER = f"{LIO_OPEN05_MAPSERVER}/7"
+ONTARIO_WOODED_AREA_LAYER = f"{LIO_OPEN07_MAPSERVER}/29"
 NOMINATIM_SEARCH = "https://nominatim.openstreetmap.org/search"
 
 
-CANADA_BOUNDS = {
+ONTARIO_BOUNDS = {
     "min_lat": 41.0,
-    "max_lat": 84.5,
-    "min_lon": -142.0,
-    "max_lon": -52.0,
+    "max_lat": 57.5,
+    "min_lon": -96.0,
+    "max_lon": -74.0,
 }
-
-
-LAND_COVER_CLASSES = {
-    1: "Temperate or sub-polar needleleaf forest",
-    2: "Sub-polar taiga needleleaf forest",
-    3: "Tropical or subtropical broadleaf evergreen forest",
-    4: "Tropical or subtropical broadleaf deciduous forest",
-    5: "Temperate or sub-polar broadleaf deciduous forest",
-    6: "Mixed forest",
-    7: "Tropical or subtropical shrubland",
-    8: "Temperate or sub-polar shrubland",
-    9: "Tropical or subtropical grassland",
-    10: "Temperate or sub-polar grassland",
-    11: "Sub-polar or polar shrubland-lichen-moss",
-    12: "Sub-polar or polar grassland-lichen-moss",
-    13: "Sub-polar or polar barren-lichen-moss",
-    14: "Wetland",
-    15: "Cropland",
-    16: "Barren lands",
-    17: "Urban and built-up",
-    18: "Water",
-    19: "Snow and ice",
-}
-FOREST_LAND_COVER_CODES = {1, 2, 3, 4, 5, 6}
-WETLAND_LAND_COVER_CODE = 14
 
 
 @dataclass(frozen=True)
@@ -76,16 +65,6 @@ class Location:
     latitude: float
     longitude: float
     source: str
-
-
-@dataclass(frozen=True)
-class LandCover:
-    """A single raster land-cover lookup result."""
-
-    code: int | None
-    label: str
-    raw_attributes: dict[str, Any]
-    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -145,7 +124,7 @@ def parse_coordinate_pair(text: str) -> tuple[float, float] | None:
 
 
 def resolve_location(user_input: str) -> Location:
-    """Resolve coordinates directly or geocode a Canadian place/address string."""
+    """Resolve coordinates directly or geocode an Ontario place/address string."""
 
     coordinate_pair = parse_coordinate_pair(user_input)
     if coordinate_pair:
@@ -158,17 +137,25 @@ def resolve_location(user_input: str) -> Location:
         )
 
     params = {
-        "q": user_input,
+        "q": user_input if "ontario" in user_input.lower() else f"{user_input}, Ontario",
         "format": "jsonv2",
-        "limit": 1,
+        "limit": 5,
         "countrycodes": "ca",
         "addressdetails": 1,
     }
     matches = http_json(NOMINATIM_SEARCH, params)
     if not matches:
-        raise ZoneCheckError(f"Could not geocode a Canadian location for: {user_input!r}")
+        raise ZoneCheckError(f"Could not geocode an Ontario location for: {user_input!r}")
 
-    best = matches[0]
+    best = next(
+        (
+            match
+            for match in matches
+            if match.get("address", {}).get("state") == "Ontario"
+            or "Ontario" in match.get("display_name", "")
+        ),
+        matches[0],
+    )
     return Location(
         label=best.get("display_name", user_input),
         latitude=float(best["lat"]),
@@ -177,12 +164,12 @@ def resolve_location(user_input: str) -> Location:
     )
 
 
-def is_inside_canada_bounds(location: Location) -> bool:
-    """Return whether coordinates are within a broad Canada bounding box."""
+def is_inside_ontario_bounds(location: Location) -> bool:
+    """Return whether coordinates are within a broad Ontario bounding box."""
 
     return (
-        CANADA_BOUNDS["min_lat"] <= location.latitude <= CANADA_BOUNDS["max_lat"]
-        and CANADA_BOUNDS["min_lon"] <= location.longitude <= CANADA_BOUNDS["max_lon"]
+        ONTARIO_BOUNDS["min_lat"] <= location.latitude <= ONTARIO_BOUNDS["max_lat"]
+        and ONTARIO_BOUNDS["min_lon"] <= location.longitude <= ONTARIO_BOUNDS["max_lon"]
     )
 
 
@@ -266,195 +253,241 @@ def identify_arcgis_map(
     return data.get("results", [])
 
 
-def extract_pixel_value(attributes: dict[str, Any]) -> int | None:
-    """Extract an integer raster pixel value from ArcGIS identify attributes."""
-
-    for key in ("Pixel Value", "PixelValue", "pixel_value"):
-        if key in attributes:
-            try:
-                return int(float(str(attributes[key])))
-            except ValueError:
-                return None
-    return None
-
-
-def get_land_cover(longitude: float, latitude: float) -> LandCover:
-    """Identify the NRCan land-cover raster class at a point."""
+def format_area_hectares(square_meters: Any) -> str | None:
+    """Convert an area value in square meters to a printable hectare string."""
 
     try:
-        results = identify_arcgis_map(LAND_COVER_MAPSERVER, "0", longitude, latitude)
-    except ZoneCheckError as exc:
-        return LandCover(code=None, label="Unknown", raw_attributes={}, error=str(exc))
-
-    if not results:
-        return LandCover(code=None, label="No land-cover pixel returned", raw_attributes={})
-
-    attributes = results[0].get("attributes", {})
-    code = extract_pixel_value(attributes)
-    label = LAND_COVER_CLASSES.get(code, f"Unrecognized land-cover code {code}")
-    return LandCover(code=code, label=label, raw_attributes=attributes)
+        hectares = float(square_meters) / 10000
+    except (TypeError, ValueError):
+        return None
+    return f"{hectares:.2f} ha"
 
 
-def check_wetland(
-    longitude: float,
-    latitude: float,
-    land_cover: LandCover,
-) -> ZoneResult:
-    """Check CNWI detailed wetlands, with NRCan land cover as supplemental evidence."""
+def check_wetland(longitude: float, latitude: float) -> ZoneResult:
+    """Check Ontario GeoHub/LIO wetland polygons at a point."""
 
-    source = (
-        "ECCC Canadian National Wetlands Inventory (CNWI) detailed wetland polygons; "
-        "supplemented by NRCan Land Cover of Canada raster"
+    source = "Ontario GeoHub / LIO Wetland With Significance"
+    fields = (
+        "WETLAND_TYPE,EVALUATED_WETLAND_NAME,WETLAND_SIGNIFICANCE,"
+        "EVALUATED_WETLAND_IND,COASTAL_IND,SYSTEM_CALCULATED_AREA,"
+        "LOCATION_ACCURACY,SOURCE_NAME"
     )
-    details: list[str] = []
-    matched = False
-
-    try:
-        results = identify_arcgis_map(CNWI_MAPSERVER, "1", longitude, latitude, tolerance=5)
-    except ZoneCheckError as exc:
-        return ZoneResult(
-            zone="Wetland",
-            matched=None,
-            source=source,
-            details=details,
-            error=str(exc),
-        )
-
-    if results:
-        matched = True
-        attrs = results[0].get("attributes", {})
-        wetland_class = attrs.get("CNWI WETLAND CLASS") or attrs.get("value")
-        area = attrs.get("WETLAND AREA (m2)") or attrs.get("WETLAND AREA (m\u00b2)")
-        if wetland_class:
-            details.append(f"CNWI wetland class: {wetland_class}")
-        if area:
-            details.append(f"CNWI wetland area: {area} m2")
-        if attrs.get("SOURCE FEATURE ID"):
-            details.append(f"Source feature ID: {attrs['SOURCE FEATURE ID']}")
-    else:
-        details.append("CNWI returned no detailed wetland polygon at the point.")
-
-    if land_cover.code == WETLAND_LAND_COVER_CODE:
-        matched = True
-        details.append("NRCan land-cover pixel class is Wetland.")
-    elif land_cover.error:
-        details.append(f"NRCan land-cover lookup unavailable: {land_cover.error}")
-    elif land_cover.code is not None:
-        details.append(f"NRCan land-cover pixel class: {land_cover.label}.")
-
-    return ZoneResult(zone="Wetland", matched=matched, source=source, details=details)
-
-
-def check_forest(
-    longitude: float,
-    latitude: float,
-    land_cover: LandCover,
-) -> ZoneResult:
-    """Check forest land cover, with vegetation zone context as a fallback."""
-
-    source = (
-        "NRCan Land Cover of Canada raster; supplemented by NRCan Vegetation Zones "
-        "of Canada"
-    )
-    details: list[str] = []
-    matched: bool | None
-
-    if land_cover.error:
-        matched = None
-        details.append(f"Land-cover lookup unavailable: {land_cover.error}")
-    elif land_cover.code is None:
-        matched = None
-        details.append(land_cover.label)
-    else:
-        matched = land_cover.code in FOREST_LAND_COVER_CODES
-        details.append(f"Land-cover pixel class: {land_cover.label}.")
-
-    try:
-        vegetation = query_arcgis_features(
-            VEGETATION_LAYER,
-            longitude,
-            latitude,
-            "level_1,level_2",
-            record_count=1,
-        )
-    except ZoneCheckError as exc:
-        details.append(f"Vegetation-zone lookup unavailable: {exc}")
-        return ZoneResult(zone="Forest land", matched=matched, source=source, details=details)
-
-    if vegetation:
-        attrs = vegetation[0]
-        level_1 = attrs.get("level_1")
-        level_2 = attrs.get("level_2")
-        zone_text = " / ".join(str(part) for part in (level_1, level_2) if part)
-        if zone_text:
-            details.append(f"Vegetation zone context: {zone_text}.")
-        if matched is None:
-            lowered = zone_text.lower()
-            matched = any(word in lowered for word in ("forest", "rainforest", "woodland"))
-    else:
-        details.append("No vegetation-zone polygon returned at the point.")
-
-    return ZoneResult(zone="Forest land", matched=matched, source=source, details=details)
-
-
-def check_restricted_area(longitude: float, latitude: float) -> ZoneResult:
-    """Check protected/conserved areas as a practical national restricted-area layer."""
-
-    source = "ECCC Canadian Protected and Conserved Areas Database (CPCAD)"
-    fields = "NAME_E,TYPE_E,PA_BIOME,OWNER_E,MGMT_E,STATUS"
     try:
         features = query_arcgis_features(
-            CPCAD_LAYER,
+            ONTARIO_WETLAND_LAYER,
             longitude,
             latitude,
             fields,
             record_count=5,
         )
     except ZoneCheckError as exc:
-        return ZoneResult(
-            zone="Restricted/protected area",
-            matched=None,
-            source=source,
-            details=[],
-            error=str(exc),
-        )
+        return ZoneResult("Wetland", None, source, [], error=str(exc))
 
     if not features:
         return ZoneResult(
-            zone="Restricted/protected area",
-            matched=False,
-            source=source,
-            details=["CPCAD returned no protected or conserved area at the point."],
+            "Wetland",
+            False,
+            source,
+            ["Ontario Wetland With Significance returned no polygon at the point."],
         )
 
     details = []
     for attrs in features:
-        name = attrs.get("NAME_E") or "Unnamed area"
-        area_type = attrs.get("TYPE_E") or attrs.get("PA_BIOME") or "protected/conserved area"
-        manager = attrs.get("MGMT_E")
-        owner = attrs.get("OWNER_E")
-        line = f"{name} ({area_type})"
-        if manager:
-            line += f", managed by {manager}"
-        elif owner:
-            line += f", owner: {owner}"
+        wetland_type = attrs.get("WETLAND_TYPE") or "Wetland"
+        name = attrs.get("EVALUATED_WETLAND_NAME")
+        significance = attrs.get("WETLAND_SIGNIFICANCE")
+        evaluated = attrs.get("EVALUATED_WETLAND_IND")
+        area = format_area_hectares(attrs.get("SYSTEM_CALCULATED_AREA"))
+        line = str(wetland_type)
+        if name:
+            line += f" - {name}"
+        if significance:
+            line += f" ({significance})"
+        if evaluated:
+            line += f", evaluated: {evaluated}"
+        if area:
+            line += f", area: {area}"
         details.append(line)
 
+    return ZoneResult("Wetland", True, source, details)
+
+
+def check_forest(longitude: float, latitude: float) -> ZoneResult:
+    """Check Ontario GeoHub/LIO wooded-area polygons at a point."""
+
+    source = "Ontario GeoHub / LIO Wooded Area"
+    fields = (
+        "WOODED_AREA_TYPE,CLASS_SUBTYPE,SYSTEM_CALCULATED_AREA,"
+        "LOCATION_ACCURACY,VERIFICATION_STATUS_FLG"
+    )
+    try:
+        features = query_arcgis_features(
+            ONTARIO_WOODED_AREA_LAYER,
+            longitude,
+            latitude,
+            fields,
+            record_count=5,
+        )
+    except ZoneCheckError as exc:
+        return ZoneResult("Wooded/forest area", None, source, [], error=str(exc))
+
+    if not features:
+        return ZoneResult(
+            "Wooded/forest area",
+            False,
+            source,
+            ["Ontario Wooded Area returned no polygon at the point."],
+        )
+
+    details = []
+    for attrs in features:
+        wooded_type = attrs.get("WOODED_AREA_TYPE") or "Wooded area"
+        subtype = attrs.get("CLASS_SUBTYPE")
+        area = format_area_hectares(attrs.get("SYSTEM_CALCULATED_AREA"))
+        line = str(wooded_type)
+        if subtype:
+            line += f" ({subtype})"
+        if area:
+            line += f", area: {area}"
+        details.append(line)
+
+    return ZoneResult("Wooded/forest area", True, source, details)
+
+
+def query_named_layer(
+    layer_url: str,
+    layer_name: str,
+    longitude: float,
+    latitude: float,
+    fields: str,
+) -> tuple[str, list[dict[str, Any]] | None, str | None]:
+    """Query one Ontario GeoHub/LIO named layer."""
+
+    try:
+        features = query_arcgis_features(
+            layer_url,
+            longitude,
+            latitude,
+            fields,
+            record_count=5,
+        )
+    except ZoneCheckError as exc:
+        return layer_name, None, str(exc)
+    return layer_name, features, None
+
+
+def describe_protected_feature(layer_name: str, attrs: dict[str, Any]) -> str:
+    """Build a concise protected/restricted layer description."""
+
+    name = (
+        attrs.get("PROTECTED_AREA_NAME_ENG")
+        or attrs.get("ANSI_NAME")
+        or attrs.get("OFFICIAL_NAME")
+        or attrs.get("COMMON_SHORT_NAME")
+        or "Unnamed area"
+    )
+    area_type = (
+        attrs.get("TYPE_ENG")
+        or attrs.get("CLASS_SUBTYPE")
+        or attrs.get("ANSI_SIGNIFICANCE")
+        or attrs.get("REGULATED_IND")
+        or layer_name
+    )
+    status = attrs.get("STATUS_ENG")
+    management = attrs.get("MANAGEMENT_ENG")
+    area = format_area_hectares(
+        attrs.get("SYSTEM_CALCULATED_AREA") or attrs.get("REGULATED_AREA")
+    )
+    line = f"{layer_name}: {name} ({area_type})"
+    if status:
+        line += f", status: {status}"
+    if management:
+        line += f", management: {management}"
+    if area:
+        line += f", area: {area}"
+    return line
+
+
+def check_restricted_area(longitude: float, latitude: float) -> ZoneResult:
+    """Check Ontario regulated/protected and natural-heritage constraint layers."""
+
+    source = (
+        "Ontario GeoHub / LIO Provincial Park Regulated, Conservation Reserve "
+        "Regulated, ANSI, and Crown Game Preserve"
+    )
+    layer_specs = [
+        (
+            ONTARIO_PROVINCIAL_PARK_LAYER,
+            "Provincial Park Regulated",
+            (
+                "PROTECTED_AREA_NAME_ENG,TYPE_ENG,STATUS_ENG,MANAGEMENT_ENG,"
+                "REGULATED_AREA,SYSTEM_CALCULATED_AREA"
+            ),
+        ),
+        (
+            ONTARIO_CONSERVATION_RESERVE_LAYER,
+            "Conservation Reserve Regulated",
+            (
+                "PROTECTED_AREA_NAME_ENG,TYPE_ENG,STATUS_ENG,MANAGEMENT_ENG,"
+                "REGULATED_AREA,SYSTEM_CALCULATED_AREA"
+            ),
+        ),
+        (
+            ONTARIO_ANSI_LAYER,
+            "Area of Natural and Scientific Interest (ANSI)",
+            "ANSI_NAME,CLASS_SUBTYPE,ANSI_SIGNIFICANCE,SYSTEM_CALCULATED_AREA",
+        ),
+        (
+            ONTARIO_CROWN_GAME_PRESERVE_LAYER,
+            "Crown Game Preserve",
+            "OFFICIAL_NAME,REGULATED_IND,SYSTEM_CALCULATED_AREA,LOCATION_DESCR",
+        ),
+    ]
+
+    details: list[str] = []
+    errors: list[str] = []
+    for layer_url, layer_name, fields in layer_specs:
+        queried_name, features, error = query_named_layer(
+            layer_url,
+            layer_name,
+            longitude,
+            latitude,
+            fields,
+        )
+        if error:
+            errors.append(f"{queried_name}: {error}")
+            continue
+        for attrs in features or []:
+            details.append(describe_protected_feature(queried_name, attrs))
+
+    if details:
+        return ZoneResult("Restricted/protected area", True, source, details)
+    if errors and len(errors) == len(layer_specs):
+        return ZoneResult("Restricted/protected area", None, source, [], error="; ".join(errors))
+    if errors:
+        return ZoneResult(
+            "Restricted/protected area",
+            False,
+            source,
+            [
+                "No Ontario protected/restricted layer matched the point.",
+                "Some layer queries failed: " + "; ".join(errors),
+            ],
+        )
     return ZoneResult(
-        zone="Restricted/protected area",
-        matched=True,
-        source=source,
-        details=details,
+        "Restricted/protected area",
+        False,
+        source,
+        ["No Ontario protected/restricted layer matched the point."],
     )
 
 
 def check_location(location: Location) -> list[ZoneResult]:
     """Run all zone checks for a resolved location."""
 
-    land_cover = get_land_cover(location.longitude, location.latitude)
     return [
-        check_wetland(location.longitude, location.latitude, land_cover),
-        check_forest(location.longitude, location.latitude, land_cover),
+        check_wetland(location.longitude, location.latitude),
+        check_forest(location.longitude, location.latitude),
         check_restricted_area(location.longitude, location.latitude),
     ]
 
@@ -476,8 +509,8 @@ def print_report(location: Location, results: list[ZoneResult]) -> None:
     print(f"  Label: {location.label}")
     print(f"  Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
     print(f"  Resolved by: {location.source}")
-    if not is_inside_canada_bounds(location):
-        print("  Warning: coordinates are outside a broad Canada bounding box.")
+    if not is_inside_ontario_bounds(location):
+        print("  Warning: coordinates are outside a broad Ontario bounding box.")
 
     print("\nZone checks")
     for result in results:
@@ -489,10 +522,10 @@ def print_report(location: Location, results: list[ZoneResult]) -> None:
             print(f"  Detail: {detail}")
 
     print(
-        "\nNote: CPCAD represents protected and conserved areas, which is a useful "
-        "national proxy for restricted/protected lands. Legal access restrictions can "
-        "also come from local, provincial, military, airport, or private-property rules "
-        "that are not all represented in one national open dataset."
+        "\nNote: Ontario GeoHub/LIO regulated parks, conservation reserves, ANSIs, "
+        "and Crown Game Preserves are useful open-data indicators for protected or "
+        "restricted-style constraints. Confirm legal access restrictions with the "
+        "responsible Ontario or local authority."
     )
 
 
@@ -537,10 +570,10 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
         "source": location.source,
     }
     service_data = {
-        "cnwi": CNWI_MAPSERVER,
-        "cpcad": CPCAD_MAPSERVER,
-        "landCover": LAND_COVER_MAPSERVER,
-        "vegetation": VEGETATION_MAPSERVER,
+        "wetland": LIO_OPEN01_MAPSERVER,
+        "parksAndReserves": LIO_OPEN03_MAPSERVER,
+        "naturalHeritage": LIO_OPEN05_MAPSERVER,
+        "wooded": LIO_OPEN07_MAPSERVER,
     }
     location_json = json.dumps(location_data, ensure_ascii=True)
     results_json = json.dumps(result_summary_for_map(results), ensure_ascii=True)
@@ -655,7 +688,7 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
 <body>
   <header>
     <h1>{title}</h1>
-    <p>Interactive feasibility map with public Canadian wetland, forest/vegetation, land-cover, and protected-area layers.</p>
+    <p>Interactive feasibility map with Ontario GeoHub/LIO wetland, wooded, and regulated/natural-heritage layers.</p>
   </header>
   <main>
     <aside>
@@ -663,15 +696,15 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
       <section id="results"></section>
       <section class="card">
         <h2>Layer guide</h2>
-        <div class="legend-item"><span class="swatch" style="background:#4dabf7"></span>CNWI detailed wetlands</div>
-        <div class="legend-item"><span class="swatch" style="background:#51cf66"></span>Vegetation / forest zones</div>
-        <div class="legend-item"><span class="swatch" style="background:#ffd43b"></span>NRCan land-cover raster</div>
-        <div class="legend-item"><span class="swatch" style="background:#ff6b6b"></span>CPCAD protected/conserved areas</div>
+        <div class="legend-item"><span class="swatch" style="background:#4dabf7"></span>Ontario wetlands</div>
+        <div class="legend-item"><span class="swatch" style="background:#51cf66"></span>Ontario wooded areas</div>
+        <div class="legend-item"><span class="swatch" style="background:#ff6b6b"></span>Provincial parks and conservation reserves</div>
+        <div class="legend-item"><span class="swatch" style="background:#ffd43b"></span>ANSIs and Crown Game Preserves</div>
         <p class="small">Use the layer control on the map to turn layers on or off. Some services only draw at certain zoom levels.</p>
       </section>
       <section class="card">
         <h2>Important note</h2>
-        <p class="small">Protected/conserved areas are shown as a practical national proxy for restricted zones. Always confirm legal restrictions with the responsible authority.</p>
+        <p class="small">Ontario regulated and natural-heritage layers are shown as practical indicators for constraints. Always confirm legal restrictions with the responsible authority.</p>
       </section>
     </aside>
     <div id="map"></div>
@@ -729,32 +762,32 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
     );
 
     const wetlands = L.esri.dynamicMapLayer({{
-      url: services.cnwi,
-      layers: [1],
+      url: services.wetland,
+      layers: [15],
       opacity: 0.58,
-      attribution: "ECCC CNWI"
+      attribution: "Ontario GeoHub / LIO Wetlands"
     }});
 
-    const forestZones = L.esri.dynamicMapLayer({{
-      url: services.vegetation,
-      layers: [0],
+    const woodedAreas = L.esri.dynamicMapLayer({{
+      url: services.wooded,
+      layers: [29],
       opacity: 0.42,
-      attribution: "NRCan Vegetation Zones"
+      attribution: "Ontario GeoHub / LIO Wooded Area"
     }}).addTo(map);
 
-    const landCover = L.esri.dynamicMapLayer({{
-      url: services.landCover,
-      layers: [0],
-      opacity: 0.35,
-      attribution: "NRCan Land Cover"
-    }});
-
-    const protectedAreas = L.esri.dynamicMapLayer({{
-      url: services.cpcad,
-      layers: [0],
+    const parksAndReserves = L.esri.dynamicMapLayer({{
+      url: services.parksAndReserves,
+      layers: [2, 4],
       opacity: 0.62,
-      attribution: "ECCC CPCAD"
+      attribution: "Ontario GeoHub / LIO Parks and Conservation Reserves"
     }}).addTo(map);
+
+    const naturalHeritage = L.esri.dynamicMapLayer({{
+      url: services.naturalHeritage,
+      layers: [3, 7],
+      opacity: 0.52,
+      attribution: "Ontario GeoHub / LIO ANSI and Crown Game Preserve"
+    }});
 
     const marker = L.marker([locationData.latitude, locationData.longitude])
       .addTo(map)
@@ -775,10 +808,10 @@ def render_map_html(location: Location, results: list[ZoneResult], zoom: int = 1
         "Esri World Imagery": imagery
       }},
       {{
-        "CNWI detailed wetlands": wetlands,
-        "Vegetation / forest zones": forestZones,
-        "NRCan land-cover raster": landCover,
-        "CPCAD protected/conserved areas": protectedAreas,
+        "Ontario wetlands": wetlands,
+        "Ontario wooded areas": woodedAreas,
+        "Provincial parks and conservation reserves": parksAndReserves,
+        "ANSIs and Crown Game Preserves": naturalHeritage,
         "1 km context radius": oneKmRadius,
         "Checked location marker": marker
       }},
@@ -809,14 +842,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Check whether a Canadian location is in a wetland, forest land-cover "
-            "class, or protected/conserved area."
+            "Check whether an Ontario location is in a wetland, wooded area, "
+            "or regulated/protected natural-heritage area."
         )
     )
     parser.add_argument(
         "location",
         nargs="?",
-        help="Address/place in Canada, or coordinates as 'latitude, longitude'.",
+        help="Address/place in Ontario, or coordinates as 'latitude, longitude'.",
     )
     parser.add_argument(
         "--map-output",
@@ -844,7 +877,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv)
     user_location = args.location or input(
-        "Enter a Canadian address/place or coordinates as 'latitude, longitude': "
+        "Enter an Ontario address/place or coordinates as 'latitude, longitude': "
     ).strip()
     if not user_location:
         print("No location provided.", file=sys.stderr)

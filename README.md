@@ -1,29 +1,28 @@
-# Canada Zone Checker
+# Ontario Zone Checker
 
-Small Python CLI for checking whether a Canadian location intersects:
+Small Python CLI for checking whether an Ontario location intersects:
 
-- wetland data from Environment and Climate Change Canada's Canadian National
-  Wetlands Inventory (CNWI)
-- forest land-cover classes from Natural Resources Canada's Land Cover of Canada
-  raster, with Vegetation Zones of Canada as context
-- protected/conserved areas from Environment and Climate Change Canada's
-  Canadian Protected and Conserved Areas Database (CPCAD)
+- wetland data from Ontario GeoHub / Land Information Ontario (LIO)
+  `Wetland With Significance`
+- wooded or forested polygons from Ontario GeoHub / LIO `Wooded Area`
+- regulated/protected or constraint-style areas from Ontario GeoHub / LIO:
+  `Provincial Park Regulated`, `Conservation Reserve Regulated`, `ANSI`, and
+  `Crown Game Preserve`
 
 The script uses public APIs and only the Python standard library.
 
 ## Usage
 
-Run with coordinates. Use negative longitude for locations west of Greenwich,
-including most Canadian locations:
+Run with coordinates. Use negative longitude for Ontario locations:
 
 ```bash
 python3 canada_zone_checker.py "43.274037, -79.922389"
 ```
 
-Or run with a Canadian place/address:
+Or run with an Ontario place/address:
 
 ```bash
-python3 canada_zone_checker.py "Banff National Park, Alberta"
+python3 canada_zone_checker.py "Cootes Paradise, Hamilton, Ontario"
 ```
 
 If no argument is supplied, the script prompts for a location interactively.
@@ -32,10 +31,10 @@ After the text report, the script also saves an interactive HTML map in the
 current directory. The map is centered on the checked point and includes
 toggleable layers for:
 
-- CNWI detailed wetlands
-- NRCan Vegetation Zones of Canada for forest/vegetation context
-- NRCan Land Cover of Canada raster
-- CPCAD protected/conserved areas
+- Ontario wetlands
+- Ontario wooded areas
+- provincial parks and conservation reserves
+- Areas of Natural and Scientific Interest (ANSI) and Crown Game Preserves
 
 Open the generated `.html` file in a browser to view the map. You can choose
 the output path or skip map generation:
@@ -54,7 +53,8 @@ python3 canada_zone_checker.py "43.274037, -79.922389" --open-map
 
 ## Notes
 
-For "restricted areas", this script uses CPCAD protected and conserved areas as
-a national open-data proxy. Legal restrictions can also come from local,
-provincial, military, airport, or private-property rules that are not all
-represented in a single national dataset.
+For "restricted areas", this script uses Ontario GeoHub/LIO regulated parks,
+conservation reserves, ANSIs, and Crown Game Preserves as open-data indicators.
+Legal restrictions can also come from municipal, conservation-authority, private
+property, airport, military, or other rules that are not all represented in a
+single Ontario open-data layer.

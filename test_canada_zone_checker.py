@@ -3,16 +3,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from canada_zone_checker import (
-    CANADA_BOUNDS,
-    CNWI_MAPSERVER,
-    CPCAD_MAPSERVER,
-    LandCover,
-    VEGETATION_MAPSERVER,
+    LIO_OPEN01_MAPSERVER,
+    LIO_OPEN03_MAPSERVER,
+    LIO_OPEN05_MAPSERVER,
+    LIO_OPEN07_MAPSERVER,
+    ONTARIO_BOUNDS,
     ZoneCheckError,
     ZoneResult,
     default_map_path,
-    extract_pixel_value,
-    is_inside_canada_bounds,
+    format_area_hectares,
+    is_inside_ontario_bounds,
     parse_coordinate_pair,
     render_map_html,
     safe_map_filename,
@@ -22,7 +22,7 @@ from canada_zone_checker import (
 )
 
 
-class CanadaZoneCheckerTests(unittest.TestCase):
+class OntarioZoneCheckerTests(unittest.TestCase):
     def test_parse_coordinate_pair_accepts_comma_or_space(self):
         self.assertEqual(parse_coordinate_pair("45.409, -75.500"), (45.409, -75.5))
         self.assertEqual(parse_coordinate_pair("45.409 -75.500"), (45.409, -75.5))
@@ -34,12 +34,11 @@ class CanadaZoneCheckerTests(unittest.TestCase):
     def test_parse_coordinate_pair_returns_none_for_address(self):
         self.assertIsNone(parse_coordinate_pair("Ottawa, ON"))
 
-    def test_extract_pixel_value_handles_arcgis_attribute_names(self):
-        self.assertEqual(extract_pixel_value({"Pixel Value": "14"}), 14)
-        self.assertEqual(extract_pixel_value({"PixelValue": "17.0"}), 17)
-        self.assertIsNone(extract_pixel_value({"Pixel Value": "not a number"}))
+    def test_format_area_hectares(self):
+        self.assertEqual(format_area_hectares(12345), "1.23 ha")
+        self.assertIsNone(format_area_hectares("not a number"))
 
-    def test_inside_canada_bounds(self):
+    def test_inside_ontario_bounds(self):
         ottawa = Location(
             label="Ottawa",
             latitude=45.4215,
@@ -52,18 +51,14 @@ class CanadaZoneCheckerTests(unittest.TestCase):
             longitude=2.3522,
             source="test",
         )
-        self.assertTrue(is_inside_canada_bounds(ottawa))
-        self.assertFalse(is_inside_canada_bounds(paris))
-        self.assertLess(CANADA_BOUNDS["min_lon"], ottawa.longitude)
+        self.assertTrue(is_inside_ontario_bounds(ottawa))
+        self.assertFalse(is_inside_ontario_bounds(paris))
+        self.assertLess(ONTARIO_BOUNDS["min_lon"], ottawa.longitude)
 
     def test_status_word(self):
         self.assertEqual(status_word(True), "YES")
         self.assertEqual(status_word(False), "NO")
         self.assertEqual(status_word(None), "UNKNOWN")
-
-    def test_land_cover_dataclass_stores_error(self):
-        result = LandCover(code=None, label="Unknown", raw_attributes={}, error="offline")
-        self.assertEqual(result.error, "offline")
 
     def test_safe_map_filename_is_portable(self):
         location = Location("Cootes Paradise / Hamilton, ON", 43.274037, -79.922389, "test")
@@ -93,22 +88,23 @@ class CanadaZoneCheckerTests(unittest.TestCase):
         rendered = render_map_html(location, results)
 
         self.assertIn("leaflet", rendered)
-        self.assertIn(CNWI_MAPSERVER, rendered)
-        self.assertIn(CPCAD_MAPSERVER, rendered)
-        self.assertIn(VEGETATION_MAPSERVER, rendered)
+        self.assertIn(LIO_OPEN01_MAPSERVER, rendered)
+        self.assertIn(LIO_OPEN03_MAPSERVER, rendered)
+        self.assertIn(LIO_OPEN05_MAPSERVER, rendered)
+        self.assertIn(LIO_OPEN07_MAPSERVER, rendered)
         self.assertIn('"status": "YES"', rendered)
         self.assertIn("Example &lt;Place&gt;", rendered)
 
     def test_write_map_html_writes_requested_path(self):
         location = Location("Example", 45.0, -75.0, "test")
-        results = [ZoneResult("Forest land", False, "source", ["detail"])]
+        results = [ZoneResult("Wooded/forest area", False, "source", ["detail"])]
 
         with TemporaryDirectory() as temporary_directory:
             output_path = Path(temporary_directory) / "map.html"
             written_path = write_map_html(location, results, output_path)
 
             self.assertEqual(written_path, output_path.resolve())
-            self.assertIn("Forest land", written_path.read_text(encoding="utf-8"))
+            self.assertIn("Wooded/forest area", written_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
