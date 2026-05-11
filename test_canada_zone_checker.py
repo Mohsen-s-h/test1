@@ -1,6 +1,8 @@
 import unittest
+from socket import timeout as SocketTimeout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from canada_zone_checker import (
     LIO_OPEN01_MAPSERVER,
@@ -13,6 +15,7 @@ from canada_zone_checker import (
     arcgis_geometry,
     default_map_path,
     format_area_hectares,
+    http_json,
     is_inside_ontario_bounds,
     parse_coordinate_pair,
     parse_polygon_coordinates,
@@ -29,6 +32,11 @@ class OntarioZoneCheckerTests(unittest.TestCase):
     def test_parse_coordinate_pair_accepts_comma_or_space(self):
         self.assertEqual(parse_coordinate_pair("45.409, -75.500"), (45.409, -75.5))
         self.assertEqual(parse_coordinate_pair("45.409 -75.500"), (45.409, -75.5))
+
+    def test_http_json_converts_socket_timeout_to_zone_error(self):
+        with patch("urllib.request.urlopen", side_effect=SocketTimeout("timed out")):
+            with self.assertRaisesRegex(ZoneCheckError, "Timed out"):
+                http_json("https://example.com", {"f": "json"}, timeout=1, retries=0)
 
     def test_parse_coordinate_pair_rejects_out_of_range_values(self):
         with self.assertRaises(ZoneCheckError):

@@ -12,7 +12,9 @@ import argparse
 import html
 import json
 import re
+import socket
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -89,28 +91,57 @@ class ZoneCheckError(RuntimeError):
     """Raised when a location cannot be resolved or checked."""
 
 
-def http_json(url: str, params: dict[str, Any], timeout: int = 30) -> Any:
-    """Fetch JSON from an HTTP GET endpoint."""
+def http_json(
+    url: str,
+    params: dict[str, Any],
+    timeout: int = 60,
+    method: str = "GET",
+    retries: int = 2,
+) -> Any:
+    """Fetch JSON from an HTTP endpoint with small retries for transient timeouts."""
 
     query = urllib.parse.urlencode(params)
-    request = urllib.request.Request(
-        f"{url}?{query}",
-        headers={
-            "Accept": "application/json",
-            "User-Agent": USER_AGENT,
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            charset = response.headers.get_content_charset() or "utf-8"
-            return json.loads(response.read().decode(charset))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ZoneCheckError(f"HTTP {exc.code} from {url}: {body[:300]}") from exc
-    except urllib.error.URLError as exc:
-        raise ZoneCheckError(f"Could not reach {url}: {exc.reason}") from exc
-    except json.JSONDecodeError as exc:
-        raise ZoneCheckError(f"Invalid JSON from {url}: {exc}") from exc
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    method = method.upper()
+    data = None
+    request_url = url
+    if method == "POST":
+        data = query.encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    else:
+        request_url = f"{url}?{query}"
+
+    last_error: BaseException | None = None
+    for attempt in range(retries + 1):
+        request = urllib.request.Request(request_url, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                return json.loads(response.read().decode(charset))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            if exc.code < 500 or attempt == retries:
+                raise ZoneCheckError(f"HTTP {exc.code} from {url}: {body[:300]}") from exc
+            last_error = exc
+        except (TimeoutError, socket.timeout) as exc:
+            last_error = exc
+            if attempt == retries:
+                raise ZoneCheckError(
+                    f"Timed out while reading from {url} after {retries + 1} attempts"
+                ) from exc
+        except urllib.error.URLError as exc:
+            last_error = exc
+            if attempt == retries:
+                raise ZoneCheckError(f"Could not reach {url}: {exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise ZoneCheckError(f"Invalid JSON from {url}: {exc}") from exc
+
+        time.sleep(1.5 * (attempt + 1))
+
+    raise ZoneCheckError(f"Request failed for {url}: {last_error}")
 
 
 def parse_coordinate_pair(text: str) -> tuple[float, float] | None:
@@ -317,7 +348,7 @@ def query_arcgis_features(
         "returnGeometry": "false",
         "resultRecordCount": record_count,
     }
-    data = http_json(f"{layer_url}/query", params)
+    data = http_json(f"{layer_url}/query", params, timeout=90, method="POST")
     if "error" in data:
         message = data["error"].get("message", "ArcGIS query error")
         raise ZoneCheckError(message)
