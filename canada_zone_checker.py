@@ -319,7 +319,7 @@ def check_wetland(
         matched = True
         attrs = results[0].get("attributes", {})
         wetland_class = attrs.get("CNWI WETLAND CLASS") or attrs.get("value")
-        area = attrs.get("WETLAND AREA (m2)") or attrs.get("WETLAND AREA (m²)")
+        area = attrs.get("WETLAND AREA (m2)") or attrs.get("WETLAND AREA (m\u00b2)")
         if wetland_class:
             details.append(f"CNWI wetland class: {wetland_class}")
         if area:
